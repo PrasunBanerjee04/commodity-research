@@ -17,6 +17,33 @@ A Python workspace for commodity data, analytics, and market-specific research.
 
 Local data and `.env` are excluded from Git.
 
+## Local data lake
+
+Processed datasets live under `data/lake/<market>/<dataset>/`. Partition time-based
+Parquet data by year and month; use a daily partition only when it avoids tiny files.
+
+```text
+data/
+├── raw/                         # Source downloads, retained as needed
+├── state/                       # Job checkpoints and manifests
+└── lake/
+    ├── power_gas/
+    │   ├── nodal_prices/
+    │   └── load/
+    ├── weather/
+    │   └── forecasts/
+    ├── oil/
+    │   └── crude_flows/
+    └── ags/
+        └── crop_progress/
+            └── year=YYYY/
+```
+
+Use `year=YYYY/month=MM/` partitions for most datasets. Keep query fields such as
+timestamps, locations, and symbols in the Parquet data rather than adding them to
+the directory path. Forecast datasets can use `run_date=YYYY-MM-DD/` when forecast
+runs need to remain distinct.
+
 ## Markets
 
 ### Power & Gas
