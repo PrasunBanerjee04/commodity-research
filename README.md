@@ -21,24 +21,24 @@ Local data and `.env` are excluded from Git.
 
 ### Power & Gas
 
-Spark spreads, nodal congestion, economic dispatch, renewables.
+Spark spreads, nodal congestion, economic dispatch, renewables
 
 ![Power transmission lines at sunset](assets/markets/power.jpg)
 
 ### Weather
 
-Statistical methods for weather and atmospheric modeling.
+Statistical methods for weather and atmospheric modeling
 
 ![Weather forecast map](assets/markets/weather.jpg)
 
 ### Oil
 
-Crack spreads, crude, distillates, liquids.
+Crack spreads, crude, distillates, liquids
 
 ![Crude oil](assets/markets/crude.jpg)
 
 ### Agriculture
 
-Crush spreads and crop progress.
+Crush spreads and crop progress, satelite models
 
 ![Soybean harvest](assets/markets/soybeans.jpg)
