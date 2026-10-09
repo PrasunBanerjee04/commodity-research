@@ -103,7 +103,7 @@ class LoaderTests(unittest.TestCase):
             metadata = loader.inspect_dataset(dataset)
             self.assertEqual(
                 [signal.label for signal in metadata.signals],
-                ["LMP", "Energy", "Congestion", "Losses", "GHG"],
+                ["LMP", "Energy", "Congestion", "Loss", "GHG"],
             )
             self.assertEqual({signal.unit for signal in metadata.signals}, {"$/MWh"})
             selected = (metadata.signals[0].key, metadata.signals[2].key)
@@ -286,6 +286,7 @@ class LoaderTests(unittest.TestCase):
         with self.assertRaises(loader.LakeError):
             loader.inspect_dataset(dataset)
 
+
 @unittest.skipUnless(HAS_DASHBOARD, "Install .[dashboard] to run dashboard checks")
 class DashboardApiTests(unittest.TestCase):
     def setUp(self):
@@ -293,11 +294,7 @@ class DashboardApiTests(unittest.TestCase):
         self.addCleanup(self.temporary.cleanup)
         self.root = Path(self.temporary.name)
         self.feed = "power_gas/napg/caiso/dam_lmp"
-        path = (
-            self.root
-            / self.feed
-            / "year=2024/month=01/day=01/data.parquet"
-        )
+        path = self.root / self.feed / "year=2024/month=01/day=01/data.parquet"
         path.parent.mkdir(parents=True)
         price_data("mw", hours=48, nodes=("SP15", "NP15")).write_parquet(path)
         loader.clear_caches()
@@ -335,7 +332,9 @@ class DashboardApiTests(unittest.TestCase):
         self.assertIn(b"Commodities Analytics Dashboard", html)
         status, headers, script = self.get("/src/main.js")
         self.assertEqual(status, 200)
-        self.assertEqual(headers["Content-Security-Policy"].split(";")[0], "default-src 'self'")
+        self.assertEqual(
+            headers["Content-Security-Policy"].split(";")[0], "default-src 'self'"
+        )
         self.assertIn(b"DockManager", script)
         self.assertIn("script-src 'self'", headers["Content-Security-Policy"])
         status, _, stylesheet = self.get("/styles/theme.css")
@@ -359,7 +358,7 @@ class DashboardApiTests(unittest.TestCase):
         self.assertEqual(metadata["dataset"]["title"], "CAISO / Day-Ahead LMP")
         self.assertEqual(
             [signal["label"] for signal in metadata["signals"]],
-            ["LMP", "Energy", "Congestion", "Losses", "GHG"],
+            ["LMP", "Energy", "Congestion", "Loss", "GHG"],
         )
         status, _, body = self.get(f"/api/options?key={self.feed}&dimension=node")
         self.assertEqual(status, 200)
@@ -382,6 +381,9 @@ class DashboardApiTests(unittest.TestCase):
         self.assertEqual(result["observations"], 48)
         self.assertEqual(result["statistics"][0]["series"], "LMP · SP15 · DAM")
         self.assertEqual(result["statistics"][0]["last"], 57)
+        self.assertTrue(result["plot"][0]["timestamp"].endswith("Z"))
+        self.assertEqual(result["plot"][0]["component"], "LMP")
+        self.assertEqual(result["plot"][0]["node"], "SP15")
         request["zone"] = ["not-a-zone"]
         status, _, body = self.post("/api/series", request)
         self.assertEqual(status, 400)

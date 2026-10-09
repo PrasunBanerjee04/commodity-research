@@ -1,6 +1,17 @@
 import { loadMetadata, loadOptions, loadSeries } from "./api.js";
 
-const TRACE_COLORS = ["#2962FF", "#089981", "#F23645", "#8B5CF6", "#FF9800", "#00BCD4"];
+const NODE_COLORS = ["#2962FF", "#089981", "#D18B35", "#8191A8", "#F23645"];
+const COMPONENT_ALIASES = { MCE: "ENERGY", MCC: "CONG", MCL: "LOSS", MGHG: "GHG" };
+
+export function traceStyle(row) {
+  const node = row.node || row.series.split(" · ")[1] || row.series;
+  let hash = 0;
+  for (const char of node) hash = (Math.imul(hash, 31) + char.charCodeAt(0)) >>> 0;
+  const base = node.includes("NP15") ? NODE_COLORS[0] : node.includes("SP15") ? NODE_COLORS[1] : node.includes("ZP26") ? NODE_COLORS[2] : NODE_COLORS[hash % NODE_COLORS.length];
+  const component = row.component || "LMP";
+  const alpha = { LMP: "FF", ENERGY: "AA", CONG: "DD", LOSS: "88", GHG: "66" }[component] || "FF";
+  return { stroke: `${base}${alpha}`, dash: component === "CONG" ? [6, 4] : component === "LOSS" ? [2, 3] : [], width: component === "LMP" ? 1.6 : 1.2 };
+}
 const DATE_RANGES = ["1D", "5D", "1M", "1Y", "ALL"];
 const METRICS = [
   ["LAST", "last"],
@@ -71,10 +82,12 @@ export class ChartPanel {
     this.dataset = dataset;
     this.container = container;
     this.onError = onError;
-    this.settingsKey = settingsKey;
+    this.settingsKey = dataset.key;
     this.metadata = null;
     this.chart = null;
     this.settings = savedSettings(this.settingsKey);
+    if (!Object.keys(this.settings).length && settingsKey !== this.settingsKey) this.settings = savedSettings(settingsKey);
+    this.hiddenSeries = new Set(this.settings.hiddenSeries || []);
     this.filters = {};
     this.resizeObserver = null;
     this.disposed = false;
@@ -94,6 +107,7 @@ export class ChartPanel {
         </div>
         <label><span class="sr-only">Start date</span><input class="panel-date" data-date="start" type="date"></label>
         <label><span class="sr-only">End date</span><input class="panel-date" data-date="end" type="date"></label>
+        <div class="component-ribbon" role="group" aria-label="LMP Components"></div>
         <details class="signal-picker">
           <summary data-signal-label>SIGNALS</summary>
           <div class="signal-options" data-signal-options></div>
@@ -104,6 +118,7 @@ export class ChartPanel {
       <div class="panel-metrics" aria-label="Market metrics"></div>
       <section class="panel-chart">
         <div class="chart-mount"></div>
+        <div class="chart-legend" role="group" aria-label="Chart legend"></div>
         <div class="chart-empty" hidden>NO_DATA_AVAILABLE_FOR_FILTER_RANGE</div>
       </section>
       <div class="panel-error" role="status"></div>
@@ -116,6 +131,8 @@ export class ChartPanel {
     this.endInput = this.container.querySelector('[data-date="end"]');
     this.signalLabel = this.container.querySelector("[data-signal-label]");
     this.signalOptions = this.container.querySelector("[data-signal-options]");
+    this.componentRibbon = this.container.querySelector(".component-ribbon");
+    this.legend = this.container.querySelector(".chart-legend");
     this.dimensionControls = this.container.querySelector(".dimension-controls");
 
     this.container.querySelector(".panel-update").addEventListener("click", () => this.refresh());
@@ -124,16 +141,29 @@ export class ChartPanel {
     });
     this.startInput.addEventListener("change", () => this.setRangeActive(null));
     this.endInput.addEventListener("change", () => this.setRangeActive(null));
-    this.signalOptions.addEventListener("change", (event) => {
-      const checked = this.signalOptions.querySelectorAll('input[type="checkbox"]:checked');
+    const signalChange = (event) => {
+      const checked = this.container.querySelectorAll('[data-signal-key]:checked');
       if (checked.length > 8) {
         event.target.checked = false;
         this.showError(new Error("Select no more than eight signals."));
         return;
       }
       this.persistAndRefresh();
-    });
+    };
+    this.signalOptions.addEventListener("change", signalChange);
+    this.componentRibbon.addEventListener("change", signalChange);
     this.dimensionControls.addEventListener("change", (event) => {
+      const node = event.target.closest("input[data-node]");
+      if (node) {
+        const chosen = new Set(this.filters.node || []);
+        if (node.checked) chosen.add(node.value); else chosen.delete(node.value);
+        const selected = [...chosen];
+        if (selected.length > 8) { node.checked = false; this.showError(new Error("Select up to eight nodes.")); return; }
+        this.filters.node = selected;
+        this.updateNodeLabel();
+        this.persistAndRefresh();
+        return;
+      }
       const select = event.target.closest("select[data-dimension]");
       if (!select) return;
       const { dimension } = select.dataset;
@@ -176,32 +206,38 @@ export class ChartPanel {
     this.startInput.value = this.settings.start && this.settings.start >= earliest
       ? this.settings.start
       : earliest;
-    const initialRange = this.settings.range || "1M";
+    const initialRange = this.settings.range === undefined ? "1M" : this.settings.range;
     this.setRangeActive(initialRange);
-    if (initialRange !== "ALL") this.applyRange(initialRange, false);
+    if (initialRange && initialRange !== "ALL") this.applyRange(initialRange, false);
   }
 
   configureSignals() {
     this.signals = this.metadata.signals || [];
-    const requested = this.settings.signals || [];
+    const requested = (this.settings.signals || []).map(key => {
+      const [column, component] = key.split(":");
+      return component ? `${column}:${COMPONENT_ALIASES[component] || component}` : key;
+    });
     const selected = requested.filter((key) => this.signals.some((signal) => signal.key === key));
-    if (selected.length) {
+    if (selected.length || (Array.isArray(this.settings.signals) && !this.settings.signals.length)) {
       this.settings.signals = selected;
     } else {
       this.settings.signals = this.signals.slice(0, 1).map((signal) => signal.key);
     }
     this.signalOptions.replaceChildren();
+    this.componentRibbon.replaceChildren();
     for (const signal of this.signals) {
       const label = document.createElement("label");
       const checkbox = document.createElement("input");
       checkbox.type = "checkbox";
       checkbox.value = signal.key;
+      checkbox.dataset.signalKey = signal.key;
       checkbox.checked = this.settings.signals.includes(signal.key);
       checkbox.setAttribute("aria-label", signal.label);
       const text = document.createElement("span");
       text.textContent = signal.label;
       label.append(checkbox, text);
-      this.signalOptions.append(label);
+      if (["LMP", "ENERGY", "CONG", "LOSS"].includes(signal.component)) this.componentRibbon.append(label);
+      else this.signalOptions.append(label);
     }
     this.updateSignalLabel();
   }
@@ -214,6 +250,41 @@ export class ChartPanel {
     for (const dimension of ordered) {
       const result = await loadOptions(this.dataset.key, dimension);
       if (this.disposed) return;
+      if (dimension === "node") {
+        const picker = document.createElement("details");
+        picker.className = "signal-picker node-picker";
+        const summary = document.createElement("summary");
+        summary.dataset.nodeLabel = "";
+        summary.textContent = "NODES";
+        const options = document.createElement("div");
+        options.className = "signal-options";
+        const values = result.values || [];
+        const requested = this.settings.filters?.node;
+        // A bounded initial selection keeps an all-node feed below the trace limit.
+        const selected = requested === undefined ? values.slice(0, 1) : requested;
+        this.filters.node = values.filter(value => selected.includes(value));
+        const search = document.createElement("input");
+        search.type = "search"; search.placeholder = "Find PNode…"; search.setAttribute("aria-label", "Find PNode");
+        const list = document.createElement("div");
+        const render = () => {
+          list.replaceChildren();
+          const matches = values.filter(value => value.toLowerCase().includes(search.value.toLowerCase()));
+          for (const value of matches.slice(0, 200)) {
+            const label = document.createElement("label");
+            const input = document.createElement("input");
+            input.type = "checkbox"; input.value = value; input.dataset.node = "";
+            input.checked = this.filters.node.includes(value);
+            input.setAttribute("aria-label", value);
+            const text = document.createElement("span"); text.textContent = value;
+            label.append(input, text); list.append(label);
+          }
+          if (matches.length > 200) {
+            const note = document.createElement("small"); note.textContent = `${matches.length} matches; refine search`; list.append(note);
+          }
+        };
+        search.addEventListener("input", render); render(); options.append(search, list);
+        picker.append(summary, options); fragments.push(picker); continue;
+      }
       const select = document.createElement("select");
       select.className = "panel-control";
       select.dataset.dimension = dimension;
@@ -236,6 +307,7 @@ export class ChartPanel {
       fragments.push(select);
     }
     this.dimensionControls.replaceChildren(...fragments);
+    this.updateNodeLabel();
   }
 
   applyRange(range, refresh = true) {
@@ -256,9 +328,14 @@ export class ChartPanel {
   }
 
   selectedSignals() {
-    return [...this.signalOptions.querySelectorAll('input[type="checkbox"]:checked')]
+    return [...this.container.querySelectorAll('[data-signal-key]:checked')]
       .slice(0, 8)
       .map((checkbox) => checkbox.value);
+  }
+
+  updateNodeLabel() {
+    const summary = this.dimensionControls.querySelector("[data-node-label]");
+    if (summary) summary.textContent = `NODES ${this.filters.node?.length || 0}`;
   }
 
   updateSignalLabel() {
@@ -307,8 +384,13 @@ export class ChartPanel {
         filters: this.filters,
         frequency: "native",
         aggregation: "Mean",
+        fallbackToLatest: this.settings.range === "1M",
       });
       if (this.disposed || requestSequence !== this.requestSequence) return;
+      if (result.fallbackHorizon) {
+        [this.startInput.value, this.endInput.value] = result.fallbackHorizon;
+        this.error.textContent = "Default horizon was empty; showing the latest available selected series.";
+      }
       this.renderMetrics(result.statistics || []);
       this.renderChart(result.plot || []);
       this.settings = {
@@ -347,6 +429,7 @@ export class ChartPanel {
   renderChart(rows) {
     this.lastRows = rows;
     this.destroyChart();
+    this.legend.replaceChildren();
     if (!rows.length) {
       this.empty.hidden = false;
       return;
@@ -375,10 +458,10 @@ export class ChartPanel {
       scales: { x: { time: true } },
       series: [
         { value: (_plot, timestamp) => timestamp == null ? "" : new Date(timestamp * 1000).toISOString() },
-        ...labels.map((label, index) => ({
+        ...labels.map((label) => ({
           label,
-          stroke: TRACE_COLORS[index % TRACE_COLORS.length],
-          width: 1.5,
+          ...traceStyle(rows.find(row => row.series === label)),
+          show: !this.hiddenSeries.has(label),
           points: { show: false },
         })),
       ],
@@ -407,6 +490,21 @@ export class ChartPanel {
       },
       legend: { show: false },
     }, data, this.mount);
+    labels.forEach((label, index) => {
+      const button = document.createElement("button");
+      button.type = "button"; button.textContent = label; button.title = label;
+      button.style.setProperty("--trace-color", traceStyle(rows.find(row => row.series === label)).stroke);
+      button.setAttribute("aria-pressed", String(!this.hiddenSeries.has(label)));
+      button.addEventListener("click", () => {
+        const show = this.hiddenSeries.has(label);
+        if (show) this.hiddenSeries.delete(label); else this.hiddenSeries.add(label);
+        this.chart.setSeries(index + 1, { show });
+        button.setAttribute("aria-pressed", String(show));
+        this.settings.hiddenSeries = [...this.hiddenSeries];
+        saveSettings(this.settingsKey, this.settings);
+      });
+      this.legend.append(button);
+    });
   }
 
   resizeChart() {

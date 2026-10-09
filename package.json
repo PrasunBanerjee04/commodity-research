@@ -6,5 +6,9 @@
   "dependencies": {
     "dockview": "8.4.1",
     "uplot": "1.6.32"
+  },
+  "type": "module",
+  "scripts": {
+    "test": "node --test tests/dashboard_ui.test.js"
   }
 }

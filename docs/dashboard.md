@@ -18,7 +18,7 @@ and analytics caches after an ingestion run.
 ## Workspace
 
 The market-data navigator follows the data lake's commodity → region → venue →
-dataset hierarchy. Search filters feed names; selecting a leaf opens a new
+dataset hierarchy. Search filters feed names; selecting a leaf opens or focuses its singleton
 Dockview tab. Drag tabs between panel edges to create and resize horizontal or
 vertical splits, or use **1-PANE**, **2-SPLIT**, and **4-SPLIT** to arrange one,
 two, or four feeds. Dockview's native tab drag-and-drop supports additional
@@ -27,9 +27,8 @@ are saved locally in the browser; source rows are not stored there. The **DATA**
 button collapses the navigator.
 
 Each panel has its own date range, signal selection, node/dimension filters,
-metrics, and uPlot chart. The node filter defaults to **ALL** so a recently
-inactive node cannot hide newer
-observations for another node. Select a specific node when needed. **UPDATE**
+metrics, and uPlot chart. The node picker supports multiple selections and defaults to the first available
+node. Empty default horizons reanchor to that selected series' latest data. **UPDATE**
 refreshes that panel. The
 **LIGHT**/**DARK** control switches the workstation palette; charts redraw with
 the active theme. The initial panel opens the first discovered feed if no saved
@@ -108,3 +107,34 @@ same-origin only.
 Run `python -m unittest discover -s tests -v` to validate analytics and API
 behavior. Dashboard tests require the optional `dashboard` extra, which provides
 Arrow IPC support.
+
+## RTM compatibility and series controls
+
+Dataset paths are singleton tab identities: opening an existing feed focuses its
+panel. Closing unregisters it; reopening mounts one panel. Older saved layouts
+with duplicate dataset tabs are repaired on reload. Layout presets retain open
+feeds and their controls, and never duplicate a feed to fill an empty grid cell.
+
+CAISO reads normalize uppercase/lowercase fields in each Parquet/Arrow file.
+Explicit GMT interval starts take precedence; otherwise `OPR_DT` and 1-based
+`OPR_HR` reconstruct Pacific local operating times. RTD uses 5-minute intervals,
+FMM/RTPD uses 15 minutes, and DAM uses 60 minutes. `OPR_INTERVAL` is 1-based
+within the hour; `INTERVAL_NUM` without an hour is a 1-based index from Pacific
+midnight. Ambiguous repeated local hours require explicit GMT timestamps. The
+API emits the unified UTC `timestamp` in ISO-8601 form ending in `Z`.
+
+`LMP_TYPE`, `XML_DATA`, `XML_DATA_ITEM`, and wide price fields map to `LMP`,
+`ENERGY`, `CONG`, `LOSS` (and optional `GHG`). Legacy MCE/MCC/MCL signal settings
+are migrated. **LMP / Energy / Congestion / Loss** checkboxes and the searchable
+**NODES** dropdown on each ribbon update its series immediately. All unique
+PNodes are searchable; large dropdowns render only 200 matches at a time. Select
+up to eight nodes. A new panel selects the first node to bound the initial query.
+
+Nodes retain stable hues across components: NP15 blue, SP15 green, ZP26 amber;
+congestion is dashed and losses dotted. Click the legend at the top right to
+hide/show a trace instantly, with no server request. Visibility survives theme
+changes and reloads. Selecting no nodes/components intentionally clears the chart.
+
+If the default **1M** horizon contains no observations for the selected series,
+the app reanchors to that series' latest available timestamp, updates the dates,
+and displays a notice. Explicit custom horizons stay empty when no data matches.

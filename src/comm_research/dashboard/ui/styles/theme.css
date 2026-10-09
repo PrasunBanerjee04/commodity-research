@@ -563,3 +563,12 @@ summary:focus-visible {
     width: 98px;
   }
 }
+
+.component-ribbon, .dimension-controls { display:flex; gap:4px; align-items:center; flex:0 0 auto; }
+.component-ribbon label { display:flex; align-items:center; gap:2px; padding:2px 4px; border:1px solid var(--border-subtle); white-space:nowrap; font-size:10px; }
+.component-ribbon input, .signal-options input { margin:0; accent-color:var(--accent-blue); }
+.chart-legend { position:absolute; top:4px; right:46px; z-index:2; display:flex; flex-wrap:wrap; justify-content:flex-end; gap:3px; max-width:85%; max-height:60px; overflow:auto; background:var(--bg-primary); }
+.chart-legend button { border:1px solid var(--border-subtle); border-left:3px solid var(--trace-color); padding:2px 5px; background:var(--bg-panel); color:var(--text-main); font:9px var(--font-mono); }
+.chart-legend button[aria-pressed="false"] { opacity:.45; text-decoration:line-through; }
+/* Picker overlays must escape the horizontally scrolling toolbar. */
+.signal-options { position:fixed; inset:auto; }

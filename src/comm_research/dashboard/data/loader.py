@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import os
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import date, datetime, time, timedelta, timezone
 from functools import lru_cache
 from pathlib import Path
@@ -19,6 +19,11 @@ from comm_research.dashboard.config.taxonomy import (
     TIME_COLUMNS,
     display_name,
     metric_unit,
+)
+from comm_research.infra.tools.caiso_schema import (
+    COMPONENT_ALIASES,
+    normalize_schema,
+    utc_expression,
 )
 
 FORMATS = {".parquet", ".arrow", ".ipc", ".feather"}
@@ -70,6 +75,7 @@ class Signal:
     unit: str
     selector_column: str | None = None
     selector_value: str | None = None
+    component: str | None = None
 
 
 @dataclass(frozen=True)
@@ -89,6 +95,7 @@ class SeriesBundle:
     observations: int
     points: int
     downsampled: bool
+    fallback_horizon: tuple[date, date] | None = None
 
 
 @lru_cache(maxsize=8)
@@ -175,10 +182,15 @@ def _scan(
             and not partition_start <= partition_day <= partition_end
         ):
             continue
-        if path.suffix.lower() == ".parquet":
-            frames.append(pl.scan_parquet(path, hive_partitioning=False))
-        else:
-            frames.append(pl.scan_ipc(path, memory_map=True))
+        frame = (
+            pl.scan_parquet(path, hive_partitioning=False)
+            if path.suffix.lower() == ".parquet"
+            else pl.scan_ipc(path, memory_map=True)
+        )
+        try:
+            frames.append(normalize_schema(frame, dataset.key))
+        except ValueError as error:
+            raise LakeError(str(error)) from error
     if not frames and (start or end):
         return _scan(dataset)
     if not frames:
@@ -188,19 +200,7 @@ def _scan(
 
 
 def _timestamp(frame: pl.LazyFrame, column: str) -> pl.Expr:
-    dtype = frame.collect_schema()[column]
-    value = pl.col(column)
-    if dtype == pl.Date:
-        return value.cast(pl.Datetime("us")).dt.replace_time_zone("UTC")
-    if isinstance(dtype, pl.Datetime):
-        if dtype.time_zone:
-            return value.dt.convert_time_zone("UTC").cast(pl.Datetime("us", "UTC"))
-        return value.dt.replace_time_zone("UTC").cast(pl.Datetime("us", "UTC"))
-    if dtype == pl.String:
-        return value.str.to_datetime(time_zone="UTC", strict=False).cast(
-            pl.Datetime("us", "UTC")
-        )
-    raise LakeError(f"{column} is not a supported time column.")
+    return utc_expression(frame, column)
 
 
 def _utc_bounds(start: date, end: date, zone: str) -> tuple[datetime, datetime]:
@@ -220,9 +220,13 @@ def _filtered(
     end: date | None,
     zone: str,
     filters: FilterSet,
+    prune_partitions: bool = True,
 ) -> pl.LazyFrame:
-    frame = _scan(dataset, start, end)
+    frame = _scan(dataset, start, end) if prune_partitions else _scan(dataset)
     schema = frame.collect_schema()
+    missing = [column for column, _ in metadata.schema if column not in schema]
+    if missing:
+        frame = frame.with_columns(pl.lit(None).alias(column) for column in missing)
     for column, values in filters:
         if column not in metadata.dimensions:
             raise LakeError(f"Unsupported dimension: {column}")
@@ -307,15 +311,23 @@ def inspect_dataset(dataset: Dataset) -> Metadata:
                         metric_unit(dataset.key, column),
                         selector,
                         value,
+                        value if value in COMPONENT_NAMES else None,
                     )
                 )
         else:
             signals.append(
                 Signal(
-                    column,
-                    display_name(column),
+                    COMPONENT_ALIASES.get(column.upper(), column)
+                    if "lmp" in dataset.key
+                    else column,
+                    COMPONENT_NAMES.get(
+                        COMPONENT_ALIASES.get(column.upper(), ""), display_name(column)
+                    ),
                     column,
                     metric_unit(dataset.key, column),
+                    component=COMPONENT_ALIASES.get(column.upper())
+                    if "lmp" in dataset.key
+                    else None,
                 )
             )
     dimensions = tuple(
@@ -352,14 +364,12 @@ def inspect_dataset(dataset: Dataset) -> Metadata:
 def dimension_options(dataset: Dataset, column: str) -> tuple[str, ...]:
     if column not in inspect_dataset(dataset).dimensions:
         raise LakeError("Unsupported dimension.")
-    values = (
-        _scan(dataset)
-        .select(pl.col(column).cast(pl.String).drop_nulls().unique().sort())
-        .limit(5_001)
-        .collect(engine="streaming")[column]
-        .to_list()
+    query = _scan(dataset).select(
+        pl.col(column).cast(pl.String).drop_nulls().unique().sort()
     )
-    return tuple(values[:5_000])
+    if column != "node":
+        query = query.limit(5_000)
+    return tuple(query.collect(engine="streaming")[column].to_list())
 
 
 def _signal_rows(
@@ -380,22 +390,39 @@ def _signal_rows(
     )
     expression = pl.lit(None, dtype=pl.String)
     unit = pl.lit(None, dtype=pl.String)
+    component = pl.lit(None, dtype=pl.String)
     for signal in signals:
         condition = pl.col("__desk_metric") == signal.column
         if signal.selector_column:
             condition &= pl.col(signal.selector_column) == signal.selector_value
         expression = pl.when(condition).then(pl.lit(signal.label)).otherwise(expression)
         unit = pl.when(condition).then(pl.lit(signal.unit)).otherwise(unit)
+        component = (
+            pl.when(condition).then(pl.lit(signal.component)).otherwise(component)
+        )
     labels: list[pl.Expr] = [expression]
     labels.extend(pl.col(column).fill_null("∅") for column in metadata.dimensions)
     return (
         frame.with_columns(
             pl.concat_str(labels, separator=" · ").alias("series"),
             unit.alias("unit"),
+            component.alias("component"),
+            (
+                pl.col("node")
+                if "node" in metadata.dimensions
+                else pl.lit(None, dtype=pl.String)
+            ).alias("node"),
             pl.col("__desk_value").cast(pl.Float64).alias("value"),
         )
         .filter(expression.is_not_null() & pl.col("value").is_finite())
-        .select(pl.col("__desk_time").alias("timestamp"), "series", "value", "unit")
+        .select(
+            pl.col("__desk_time").alias("timestamp"),
+            "series",
+            "value",
+            "unit",
+            "component",
+            "node",
+        )
         .unique(subset=["timestamp", "series", "value", "unit"], maintain_order=True)
     )
 
@@ -481,10 +508,26 @@ def load_series(
     filters: FilterSet = (),
     frequency: str = "native",
     aggregation: str = "Mean",
+    fallback_to_latest: bool = False,
+    prune_partitions: bool = True,
 ) -> SeriesBundle:
     metadata = inspect_dataset(dataset)
     if not metadata.time_column:
         raise LakeError("No recognized time field; switch to raw data.")
+    available = {signal.key for signal in metadata.signals}
+    signal_keys = tuple(
+        dict.fromkeys(
+            key
+            if key in available
+            else ":".join(
+                (
+                    *key.split(":")[:-1],
+                    COMPONENT_ALIASES.get(key.split(":")[-1], key.split(":")[-1]),
+                )
+            )
+            for key in signal_keys
+        )
+    )
     selected = tuple(signal for signal in metadata.signals if signal.key in signal_keys)
     if set(signal_keys) - {signal.key for signal in selected}:
         raise LakeError(
@@ -498,14 +541,18 @@ def load_series(
     ):
         raise LakeError("Invalid frequency or aggregation.")
     rows = _signal_rows(
-        _filtered(dataset, metadata, start, end, zone, filters), metadata, selected
+        _filtered(dataset, metadata, start, end, zone, filters, prune_partitions),
+        metadata,
+        selected,
     )
     rows = rows.sort("timestamp", maintain_order=True)
     if frequency != "native":
         rows = rows.with_columns(pl.col("timestamp").dt.truncate(frequency))
     value = pl.col("value").mean() if aggregation == "Mean" else pl.col("value").last()
     series = (
-        rows.group_by("timestamp", "series", "unit", maintain_order=True)
+        rows.group_by(
+            "timestamp", "series", "unit", "component", "node", maintain_order=True
+        )
         .agg(value.alias("value"), pl.len().alias("observations"))
         .limit(MAX_ANALYTIC_ROWS + 1)
         .collect(engine="streaming")
@@ -516,6 +563,32 @@ def load_series(
             "More than two million intervals selected. Narrow dates/series or choose hourly/daily frequency."
         )
     if series.is_empty():
+        if fallback_to_latest and all(values for _, values in filters):
+            latest = (
+                _signal_rows(
+                    _filtered(dataset, metadata, None, None, zone, filters),
+                    metadata,
+                    selected,
+                )
+                .select(pl.col("timestamp").max())
+                .collect(engine="streaming")
+                .item()
+            )
+            if latest is not None:
+                day = latest.astimezone(ZoneInfo(zone)).date()
+                earliest = metadata.earliest.astimezone(ZoneInfo(zone)).date()
+                horizon = (max(earliest, day - timedelta(days=29)), day)
+                bundle = load_series(
+                    dataset,
+                    *horizon,
+                    zone,
+                    signal_keys,
+                    filters,
+                    frequency,
+                    aggregation,
+                    prune_partitions=False,
+                )
+                return replace(bundle, fallback_horizon=horizon)
         return SeriesBundle(series, pl.DataFrame(), 0, 0, False)
     if series["series"].n_unique() > MAX_TRACES:
         raise LakeError("More than 64 traces selected. Narrow the series filters.")

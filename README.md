@@ -105,3 +105,6 @@ Crack spreads, crude, distillates, liquids
 Crush spreads and crop progress, satelite models
 
 ![Soybean harvest](assets/markets/soybeans.jpg)
+
+For focused DAM/RTM/FMM backfills, use `python scripts/fetch_caiso.py --help`; see
+[the CLI guide](docs/fetch_caiso.md) for inclusive dates, node selection and refresh behavior.

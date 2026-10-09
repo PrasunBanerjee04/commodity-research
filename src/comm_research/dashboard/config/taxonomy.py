@@ -45,10 +45,10 @@ ACRONYMS = {
 }
 COMPONENT_NAMES = {
     "LMP": "LMP",
-    "MCE": "Energy",
-    "MCC": "Congestion",
-    "MCL": "Losses",
-    "MGHG": "GHG",
+    "ENERGY": "Energy",
+    "CONG": "Congestion",
+    "LOSS": "Loss",
+    "GHG": "GHG",
 }
 COMPONENT_ORDER = {name: index for index, name in enumerate(COMPONENT_NAMES)}
 NON_MEASUREMENTS = {
@@ -103,10 +103,10 @@ DIMENSION_PRIORITY = (
     "scenario",
 )
 TIME_COLUMNS = (
+    "timestamp",
     "interval_start_time_gmt",
     "intervalstarttime_gmt",
     "interval_start_gmt",
-    "timestamp",
     "datetime",
     "time",
     "date",

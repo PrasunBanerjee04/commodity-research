@@ -78,7 +78,10 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 self._json({"status": "ok"})
             elif request.path == "/api/datasets":
                 self._json(
-                    [_dataset_json(dataset) for dataset in discover_lake(self.lake_root)]
+                    [
+                        _dataset_json(dataset)
+                        for dataset in discover_lake(self.lake_root)
+                    ]
                 )
             elif request.path == "/api/metadata":
                 self._metadata(self._query_value(request.query, "key"))
@@ -94,8 +97,11 @@ class DashboardHandler(BaseHTTPRequestHandler):
             else:
                 self.send_error(HTTPStatus.NOT_FOUND)
         except KeyError as error:
-            self._json({"error": str(error.args[0]) or "Unknown dataset."}, HTTPStatus.NOT_FOUND)
-        except (ValueError, LakeError) as error:
+            self._json(
+                {"error": str(error.args[0]) or "Unknown dataset."},
+                HTTPStatus.NOT_FOUND,
+            )
+        except (ValueError, LakeError, TypeError) as error:
             self._json({"error": str(error)}, HTTPStatus.BAD_REQUEST)
         except (OSError, pl.exceptions.PolarsError) as error:
             self._json({"error": str(error)}, HTTPStatus.UNPROCESSABLE_ENTITY)
@@ -112,9 +118,7 @@ class DashboardHandler(BaseHTTPRequestHandler):
                     ]
                 )
             except (OSError, pl.exceptions.PolarsError) as error:
-                self._json(
-                    {"error": str(error)}, HTTPStatus.UNPROCESSABLE_ENTITY
-                )
+                self._json({"error": str(error)}, HTTPStatus.UNPROCESSABLE_ENTITY)
             return
         if request.path not in ("/api/series", "/api/rows"):
             self.send_error(HTTPStatus.NOT_FOUND)
@@ -129,8 +133,11 @@ class DashboardHandler(BaseHTTPRequestHandler):
             else:
                 self._rows(payload, dataset, start, end, zone, filters, metadata)
         except KeyError as error:
-            self._json({"error": str(error.args[0]) or "Unknown dataset."}, HTTPStatus.NOT_FOUND)
-        except (ValueError, LakeError) as error:
+            self._json(
+                {"error": str(error.args[0]) or "Unknown dataset."},
+                HTTPStatus.NOT_FOUND,
+            )
+        except (ValueError, LakeError, TypeError) as error:
             self._json({"error": str(error)}, HTTPStatus.BAD_REQUEST)
         except (OSError, pl.exceptions.PolarsError) as error:
             self._json({"error": str(error)}, HTTPStatus.UNPROCESSABLE_ENTITY)
@@ -151,7 +158,9 @@ class DashboardHandler(BaseHTTPRequestHandler):
         self._json(
             {
                 "dataset": _dataset_json(dataset),
-                "schema": [{"field": field, "type": dtype} for field, dtype in metadata.schema],
+                "schema": [
+                    {"field": field, "type": dtype} for field, dtype in metadata.schema
+                ],
                 "timeColumn": metadata.time_column,
                 "earliest": earliest.isoformat() if earliest else None,
                 "latest": latest.isoformat() if latest else None,
@@ -160,6 +169,7 @@ class DashboardHandler(BaseHTTPRequestHandler):
                         "key": signal.key,
                         "label": signal.label,
                         "unit": signal.unit,
+                        "component": signal.component,
                     }
                     for signal in metadata.signals
                 ],
@@ -185,8 +195,10 @@ class DashboardHandler(BaseHTTPRequestHandler):
         if start is None or end is None:
             raise LakeError("This dataset has no recognized time field.")
         signals = payload.get("signals", [])
-        if not isinstance(signals, list) or len(signals) > 8 or any(
-            not isinstance(signal, str) for signal in signals
+        if (
+            not isinstance(signals, list)
+            or len(signals) > 8
+            or any(not isinstance(signal, str) for signal in signals)
         ):
             raise ValueError("Choose up to eight numeric signals.")
         frequency = payload.get("frequency", "native")
@@ -207,18 +219,26 @@ class DashboardHandler(BaseHTTPRequestHandler):
             filters,
             frequency,
             aggregation,
+            payload.get("fallbackToLatest") is True,
         )
         self._json(
             {
                 "observations": bundle.observations,
                 "points": bundle.points,
                 "downsampled": bundle.downsampled,
+                "fallbackHorizon": [day.isoformat() for day in bundle.fallback_horizon]
+                if bundle.fallback_horizon
+                else None,
                 "plot": [
                     {
-                        "timestamp": row["timestamp"].isoformat(),
+                        "timestamp": row["timestamp"]
+                        .isoformat()
+                        .replace("+00:00", "Z"),
                         "series": row["series"],
                         "value": _json_value(row["value"]),
                         "unit": row["unit"],
+                        "component": row["component"],
+                        "node": row["node"],
                     }
                     for row in bundle.plot.iter_rows(named=True)
                 ],
@@ -272,8 +292,9 @@ class DashboardHandler(BaseHTTPRequestHandler):
         zone = payload.get("zone", "UTC")
         if not isinstance(zone, str) or zone not in TIMEZONES:
             raise ValueError("Choose a supported date zone.")
-        start, end = self._parse_date(payload.get("start")), self._parse_date(
-            payload.get("end")
+        start, end = (
+            self._parse_date(payload.get("start")),
+            self._parse_date(payload.get("end")),
         )
         if (start is None) != (end is None):
             raise ValueError("Start and end dates must be provided together.")
@@ -283,13 +304,17 @@ class DashboardHandler(BaseHTTPRequestHandler):
             raise LakeError("This dataset has no recognized time field.")
         raw_filters = payload.get("filters", {})
         if not isinstance(raw_filters, dict):
-            raise ValueError("Filters must be an object.")
+            raise TypeError("Filters must be an object.")
         normalized = []
         for column, values in raw_filters.items():
             if column not in metadata.dimensions:
                 raise LakeError(f"Unsupported dimension: {column}")
-            if not isinstance(values, list) or len(values) > 8 or any(
-                not isinstance(value, str) or len(value) > 256 for value in values
+            if (
+                not isinstance(values, list)
+                or len(values) > 8
+                or any(
+                    not isinstance(value, str) or len(value) > 256 for value in values
+                )
             ):
                 raise ValueError("Choose up to eight valid values for each filter.")
             normalized.append((column, tuple(values)))
@@ -317,7 +342,7 @@ class DashboardHandler(BaseHTTPRequestHandler):
         except (json.JSONDecodeError, UnicodeDecodeError) as error:
             raise ValueError("Request body must be valid JSON.") from error
         if not isinstance(payload, dict):
-            raise ValueError("Request body must be a JSON object.")
+            raise TypeError("Request body must be a JSON object.")
         return payload
 
     @staticmethod
@@ -325,7 +350,7 @@ class DashboardHandler(BaseHTTPRequestHandler):
         if value in (None, ""):
             return None
         if not isinstance(value, str):
-            raise ValueError("Dates must use YYYY-MM-DD format.")
+            raise TypeError("Dates must use YYYY-MM-DD format.")
         return date.fromisoformat(value)
 
     @staticmethod
