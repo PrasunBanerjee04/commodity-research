@@ -44,9 +44,22 @@ timestamps, locations, and symbols in the Parquet data rather than adding them t
 the directory path. Forecast datasets can use `run_date=YYYY-MM-DD/` when forecast
 runs need to remain distinct.
 
-## Documentation
+## CAISO OASIS ingestion
 
-See the docs/ folder for documentation on different infrastructure or model components
+The incremental runner covers eight OASIS categories, streams progress to the
+terminal, and resumes downloads into daily Parquet partitions. Install and run a
+three-day SP15 day-ahead price sample:
+
+```bash
+python -m venv .venv
+.venv/bin/python -m pip install -e .
+.venv/bin/python -m comm_research.markets.power_gas.napg.caiso.caiso_oasis_pipeline \
+  --categories prices --datasets dam_lmp --nodes TH_SP15_GEN-APND \
+  --start 2026-10-01 --end 2026-10-04
+```
+
+See [OASIS usage and data fields](docs/caiso_oasis.md) for `run()` configuration,
+retention/publication limits, recovery, storage, and the report catalog.
 
 ## Markets
 
