@@ -33,17 +33,18 @@ from comm_research.infra.scrapers.caiso.oasis.models import Report
 from comm_research.infra.tools.caiso_normalizer import DEFAULT_LAKE_ROOT, normalize_csvs
 from comm_research.infra.tools.lake_methods import _clear_raw
 
-# Edit these defaults, or pass overrides to run(). Dates are inclusive/exclusive.
+# Running this module with no arguments refreshes every registered report.
 CATEGORIES = tuple(SCRAPERS)
-DATASETS: tuple[str, ...] | None = None  # None = every defined report in CATEGORIES.
-START_DATE: date | None = None  # None = rolling retention bound, per report.
+DATASETS: tuple[str, ...] | None = None 
+START_DATE: date | None = None 
 END_DATE: date | None = None
-IGNORE_END_DATE = True  # Pacific today; excludes the incomplete trading day.
-RETENTION_MONTHS = (
-    39  # Configurable backfill bound; report availability can be shorter.
-)
+
+IGNORE_END_DATE = True
+
+RETENTION_MONTHS = 39
+
 NODES = ("TH_SP15_GEN-APND", "TH_NP15_GEN-APND")
-REPORT_PARAMETERS: dict[str, dict[str, str]] = {}  # e.g. crr_inventory: market_name.
+REPORT_PARAMETERS: dict[str, dict[str, str]] = {}
 PROJECT_ROOT = Path(__file__).resolve().parents[6]
 RAW_ROOT = PROJECT_ROOT / "data/raw/caiso"
 LAKE_ROOT = DEFAULT_LAKE_ROOT

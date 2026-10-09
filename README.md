@@ -1,6 +1,6 @@
 # Commodity Research
 
-A Python workspace for commodity data, analytics, and market-specific research.
+A Python workspace for commodity data, analytics, and market-specific research. All views and research in this repository are my own and sourced from public materials and data. 
 
 ## Project layout
 
