@@ -51,7 +51,9 @@ LAKE_ROOT = DEFAULT_LAKE_ROOT
 STATE_ROOT = PROJECT_ROOT / "data/state/caiso_oasis"
 LOG_LEVEL = logging.INFO
 
-logger = logging.getLogger(__name__)
+logger = logging.getLogger(
+    "comm_research.markets.power_gas.napg.caiso.caiso_oasis_pipeline"
+)
 
 
 @dataclass
@@ -112,7 +114,10 @@ def _bounds(
             start,
             floor,
         )
-    upper = min(end, today - timedelta(days=report.publication_lag_days))
+    publication_cutoff = today - timedelta(days=report.publication_lag_days)
+    if report.publication_lag_days == 0:
+        publication_cutoff += timedelta(days=1)
+    upper = min(end, publication_cutoff)
     if report.publication_lag_quarters:
         quarter_start = date(today.year, (today.month - 1) // 3 * 3 + 1, 1)
         upper = min(
@@ -327,7 +332,7 @@ def run(
             raise ValueError(
                 f"Datasets not present in selected categories: {sorted(unknown)}"
             )
-    today = datetime.now(timezone.utc).date()
+    today = datetime.now(ZoneInfo("America/Los_Angeles")).date()
     lower = start_date if start_date is not None else START_DATE
     lower = _day(lower) if lower is not None else None
     ignore = IGNORE_END_DATE if ignore_end_date is None else ignore_end_date

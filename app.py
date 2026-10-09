@@ -1,4 +1,4 @@
-"""Run with: streamlit run app.py."""
+"""Run the local HTML dashboard with `python app.py`."""
 
 from comm_research.dashboard.app import main
 

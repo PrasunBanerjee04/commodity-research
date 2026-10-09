@@ -10,8 +10,11 @@ requires-python = ">=3.10"
 dependencies = ["polars>=1.0,<2"]
 
 [project.optional-dependencies]
-dashboard = ["streamlit>=1.65,<2", "plotly>=6,<7", "pyarrow>=14,<26", "polars>=1.30,<2"]
+dashboard = ["pyarrow>=14,<26"]
 
 [tool.setuptools.packages.find]
 where = ["src"]
 include = ["comm_research*"]
+
+[tool.setuptools.package-data]
+"comm_research.dashboard.ui" = ["*.html", "*.css", "*.js", "vendor/*", "styles/*", "src/*"]

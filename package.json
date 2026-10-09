@@ -1,0 +1,10 @@
+{
+  "name": "commodity-research-dashboard",
+  "private": true,
+  "version": "0.1.0",
+  "description": "Institutional commodities dashboard browser libraries",
+  "dependencies": {
+    "dockview": "8.4.1",
+    "uplot": "1.6.32"
+  }
+}

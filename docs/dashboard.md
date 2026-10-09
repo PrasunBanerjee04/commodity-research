@@ -4,32 +4,36 @@ From the repository root:
 
 ```bash
 .venv/bin/python -m pip install -e '.[dashboard]'
-.venv/bin/python -m streamlit run app.py
+.venv/bin/python app.py
 ```
 
-The app discovers local Parquet and Arrow IPC files under `data/lake/`. To choose
-another lake, set `COMMODITY_LAKE_ROOT=/absolute/path` before starting, or use
-**Lake source → Apply source** in the sidebar. **Rescan** refreshes the catalog and
-cached data after an ingestion run. No market-data API calls or downloads occur.
+The standard-library HTTP server hosts the static HTML/CSS/JavaScript dashboard
+at `http://127.0.0.1:8502`; Polars continues to handle lake discovery and
+analytics. No Streamlit, charting runtime, market-data API calls or downloads are
+required. The app discovers local Parquet and Arrow IPC files under `data/lake/`.
+To choose another lake, set `COMMODITY_LAKE_ROOT=/absolute/path` before starting,
+or run `python app.py --lake /absolute/path`. **Rescan** refreshes the catalog
+and analytics caches after an ingestion run.
 
 ## Workspace
 
-The collapsible lake explorer follows commodity → region → venue → dataset.
-Select a feed to append or focus a panel. **Close** removes only that panel.
-CAISO DAM/RTM panels open initially when present; otherwise the first available
-feed opens. Search filters the explorer without changing the workspace.
+The market-data navigator follows the data lake's commodity → region → venue →
+dataset hierarchy. Search filters feed names; selecting a leaf opens a new
+Dockview tab. Drag tabs between panel edges to create and resize horizontal or
+vertical splits, or use **1-PANE**, **2-SPLIT**, and **4-SPLIT** to arrange one,
+two, or four feeds. Dockview's native tab drag-and-drop supports additional
+groups. The layout, theme, and each panel's date, signal, and dimension filters
+are saved locally in the browser; source rows are not stored there. The **DATA**
+button collapses the navigator.
 
-Choose **Tabs view**, **Split 1×2**, or **Split 2×2**. Tabs load their selected panel
-on demand; split views show up to two/four panels per page. A workspace can hold
-12 panels; additional grid pages keep all open feeds available. Each panel keeps
-its own dates, signals, series filters, frequency, aggregation and inspection mode.
-Dark/light appearance uses slate panels, sharp borders and monospace figures.
-
-Preferences live in `st.session_state`; the `workspace` URL parameter restores
-active feeds, horizons and controls on browser reload. The URL contains relative
-feed names and preferences, not source rows. An alternate lake path should be set
-through the environment if it must survive a reload. An unavailable feed remains
-closable. Malformed workspace parameters fall back to defaults.
+Each panel has its own date range, signal selection, node/dimension filters,
+metrics, and uPlot chart. The node filter defaults to **ALL** so a recently
+inactive node cannot hide newer
+observations for another node. Select a specific node when needed. **UPDATE**
+refreshes that panel. The
+**LIGHT**/**DARK** control switches the workstation palette; charts redraw with
+the active theme. The initial panel opens the first discovered feed if no saved
+layout is present.
 
 ## Signals and analytics
 
@@ -46,62 +50,61 @@ numeric fields discovered from their schema; categorical series remain separate
 traces. Generic units are labeled **source units** unless the schema/feed makes
 the unit clear. Identifiers retain their original types in raw tables.
 
-Dates include both selected calendar days and default to the latest available
-30-day horizon, clamped to the source's actual bounds. **Date zone** sets date
-boundaries and hover timestamps. The axis always uses UTC to preserve ordering
-across daylight saving transitions. Range buttons (1D/5D/1M/YTD/ALL) zoom within
-the selected horizon; they do not expand the data query.
+Dates include both selected calendar days and initially cover the latest
+available month to keep large-feed views responsive. The 1D/5D/1M/1Y/ALL
+presets apply to each panel independently. Date filtering and the chart axis use
+UTC to preserve ordering across daylight saving transitions.
 
 Exact duplicate signal observations are removed. **Mean** takes the arithmetic
 mean of repeated observations in an interval; **Last** uses the final observation
 in timestamp/source order. Last does not establish the latest published revision
 when the source lacks revision timestamps. Hourly/daily frequency aggregates UTC
-bins; Native preserves source timestamps. Node, resource, product and other series
-filters apply before aggregation. An empty selection returns no rows.
+bins; Native preserves source timestamps. Node, resource, product and other
+series filters apply before aggregation. An empty selection returns no rows.
 
-Choose the **Summary series** for the ticker:
-
-- Last, minimum, maximum and arithmetic period mean use the selected series/frequency.
-- Std dev is the sample standard deviation (one observation displays `—`).
-- 24h change requires an observation exactly 24 hours before the last point:
-  `(last - reference) / abs(reference) × 100`. A missing or zero reference displays
-  `—`; shorter samples are not presented as daily changes.
+The metric strip summarizes the first returned trace: last, 24h change, minimum,
+maximum, period mean, and sample standard deviation (one observation displays
+`—`). 24h change requires an observation exactly 24 hours before the last point:
+`(last - reference) / abs(reference) × 100`. A missing or zero reference displays
+`—`; shorter samples are not presented as daily changes.
 
 Large charts keep each bin's first, last, minimum and maximum points, capped at
 4,000 displayed points per trace. Metrics use all selected aggregated intervals
 before display reduction. Queries are capped at 64 traces / two million analytic
 intervals; narrow the horizon or choose a coarser frequency when needed.
 
-**Raw data** provides sorted, server-paged source rows (100/250/500 per page),
-a CSV export of the current page, and field/type inspection. It includes all
-source fields and components matching the dates and series filters, independent
-of the chart's signal selection. Undated or nonnumeric tables remain inspectable.
-
 ## Implementation and checks
 
 ```text
-app.py                                    # checkout launcher
+app.py                                    # local HTML dashboard launcher
 src/comm_research/dashboard/
-  app.py                                  # main loop, explorer, viewport routing
-  ui/theme.py                             # theme tokens and compact CSS
-  ui/components.py                        # controls, ticker, charts, raw paging
-  ui/workspace.py                         # panel registry and persistence
+  app.py                                  # local HTTP server and JSON API
+  ui/index.html                           # dashboard document
+  ui/styles/theme.css                     # dark/light institutional terminal theme
+  ui/src/main.js                          # workstation boot and control wiring
+  ui/src/dock_manager.js                  # Dockview panels, presets and persistence
+  ui/src/tree_navigator.js                # local lake hierarchy and feed opening
+  ui/src/chart_panel.js                   # isolated controls, statistics and uPlot
+  ui/vendor/                              # self-hosted Dockview/uPlot bundles and licenses
   data/loader.py                          # cached discovery and lazy analytics
   config/taxonomy.py                      # hierarchy/field display labels
 ```
 
-Caches include file size and nanosecond modification time so refreshed partitions
-invalidate their results after rediscovery. Polars lazy scans project/filter source
-columns before collection; Arrow IPC uses memory mapping. Sources are read only,
-and symlinked files/directories are excluded. Broken sources fail within their
-panel while other feeds remain open. Use one local trusted lake per deployment;
-this app does not provide authentication or remote storage connectors.
+Caches use file size and nanosecond modification time in the discovered dataset
+fingerprint and are cleared by **Rescan**. Dated Hive partitions are pruned to the
+selected horizon (with a one-day boundary buffer); Polars then lazily
+projects/filters source columns before collection. Arrow IPC uses memory mapping.
+Sources are read only, and symlinked files/directories are excluded. Run the
+server on its default loopback address; the app does not provide authentication
+or remote storage connectors.
 
-```bash
-.venv/bin/python -m unittest discover -s tests -v
-```
+Dockview and uPlot are pinned in `package.json`; their browser distributions are
+vendored locally so the running dashboard does not load a CDN or require Node.
+The HTTP server only serves HTML, CSS, and JavaScript assets contained within the
+dashboard UI directory. Dockview positions panes through runtime inline styles,
+so the content-security policy allows inline styles while keeping scripts
+same-origin only.
 
-Dashboard tests run when the optional extra is installed; a base-only installation
-skips those tests explicitly. Browser checks cover layouts, theme changes, panel
-close/reopen and reload, using the supplied DAM and RTM files in a temporary lake.
-The uploaded files and temporary browser captures are not added to Git.
+Run `python -m unittest discover -s tests -v` to validate analytics and API
+behavior. Dashboard tests require the optional `dashboard` extra, which provides
+Arrow IPC support.

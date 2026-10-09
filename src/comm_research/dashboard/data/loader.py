@@ -5,11 +5,11 @@ from __future__ import annotations
 import os
 from dataclasses import dataclass
 from datetime import date, datetime, time, timedelta, timezone
+from functools import lru_cache
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
 import polars as pl
-import streamlit as st
 
 from comm_research.dashboard.config.taxonomy import (
     COMPONENT_NAMES,
@@ -91,7 +91,7 @@ class SeriesBundle:
     downsampled: bool
 
 
-@st.cache_data(ttl=10, max_entries=8, show_spinner=False)
+@lru_cache(maxsize=8)
 def discover_lake(root: str) -> tuple[Dataset, ...]:
     """Group Hive partitions into datasets; exclude hidden paths and symlinks."""
     lake = Path(root).expanduser().resolve()
@@ -131,17 +131,56 @@ def discover_lake(root: str) -> tuple[Dataset, ...]:
     )
 
 
-def _scan(dataset: Dataset) -> pl.LazyFrame:
+def _partition_date(dataset: Dataset, stamp: FileStamp) -> date | None:
+    try:
+        relative = Path(stamp.path).relative_to(Path(dataset.root) / dataset.key)
+    except ValueError:
+        return None
+    partition: dict[str, int] = {}
+    for segment in relative.parts[:-1]:
+        name, separator, value = segment.partition("=")
+        if separator and name in {"year", "month", "day"}:
+            try:
+                partition[name] = int(value)
+            except ValueError:
+                return None
+    if set(partition) != {"year", "month", "day"}:
+        return None
+    try:
+        return date(partition["year"], partition["month"], partition["day"])
+    except ValueError:
+        return None
+
+
+def _scan(
+    dataset: Dataset,
+    start: date | None = None,
+    end: date | None = None,
+) -> pl.LazyFrame:
     lake = Path(dataset.root).resolve()
+    if not dataset.files:
+        raise LakeError("No supported data files are available.")
     frames: list[pl.LazyFrame] = []
+    partition_start = start - timedelta(days=1) if start and end else None
+    partition_end = end + timedelta(days=1) if start and end else None
     for file in dataset.files:
         path = Path(file.path)
         if path.is_symlink() or not path.resolve().is_relative_to(lake):
             raise LakeError("The dataset contains a file outside the selected lake.")
+        partition_day = _partition_date(dataset, file)
+        if (
+            partition_start
+            and partition_end
+            and partition_day
+            and not partition_start <= partition_day <= partition_end
+        ):
+            continue
         if path.suffix.lower() == ".parquet":
             frames.append(pl.scan_parquet(path, hive_partitioning=False))
         else:
             frames.append(pl.scan_ipc(path, memory_map=True))
+    if not frames and (start or end):
+        return _scan(dataset)
     if not frames:
         raise LakeError("No supported data files are available.")
     # Union schema evolution without narrowing numeric types or adding Hive columns.
@@ -182,7 +221,7 @@ def _filtered(
     zone: str,
     filters: FilterSet,
 ) -> pl.LazyFrame:
-    frame = _scan(dataset)
+    frame = _scan(dataset, start, end)
     schema = frame.collect_schema()
     for column, values in filters:
         if column not in metadata.dimensions:
@@ -206,7 +245,7 @@ def _filtered(
     return frame
 
 
-@st.cache_data(ttl=300, max_entries=64, show_spinner=False)
+@lru_cache(maxsize=64)
 def inspect_dataset(dataset: Dataset) -> Metadata:
     frame = _scan(dataset)
     schema = frame.collect_schema()
@@ -309,7 +348,7 @@ def inspect_dataset(dataset: Dataset) -> Metadata:
     )
 
 
-@st.cache_data(ttl=300, max_entries=128, show_spinner=False)
+@lru_cache(maxsize=128)
 def dimension_options(dataset: Dataset, column: str) -> tuple[str, ...]:
     if column not in inspect_dataset(dataset).dimensions:
         raise LakeError("Unsupported dimension.")
@@ -432,7 +471,7 @@ def reduce_plot_points(
     return pl.concat(traces) if traces else frame
 
 
-@st.cache_data(ttl=120, max_entries=8, show_spinner=False)
+@lru_cache(maxsize=8)
 def load_series(
     dataset: Dataset,
     start: date,
@@ -491,7 +530,7 @@ def load_series(
     )
 
 
-@st.cache_data(ttl=120, max_entries=64, show_spinner=False)
+@lru_cache(maxsize=64)
 def raw_row_count(
     dataset: Dataset,
     start: date | None,
@@ -507,7 +546,7 @@ def raw_row_count(
     )
 
 
-@st.cache_data(ttl=120, max_entries=32, show_spinner=False)
+@lru_cache(maxsize=32)
 def load_raw_page(
     dataset: Dataset,
     start: date | None,
@@ -534,4 +573,4 @@ def clear_caches() -> None:
         raw_row_count,
         load_raw_page,
     ):
-        function.clear()
+        function.cache_clear()

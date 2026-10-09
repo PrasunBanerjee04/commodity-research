@@ -63,16 +63,18 @@ retention/publication limits, recovery, storage, and the report catalog.
 
 ## Desk dashboard
 
-Inspect local lake datasets in a dense Streamlit workspace with independent tabs,
-split views, component-aware CAISO charts, and paged raw tables:
+Inspect local lake datasets in a fast, local HTML dashboard with component-aware
+CAISO charts, market metrics, filters and paged raw tables:
 
 ```bash
 .venv/bin/python -m pip install -e '.[dashboard]'
-.venv/bin/python -m streamlit run app.py
+.venv/bin/python app.py
 ```
 
-See [dashboard usage and analytics](docs/dashboard.md) for controls, persistence,
-data formats and metric definitions.
+The dashboard opens at `http://127.0.0.1:8502`. Use `--port` to choose another
+port or set `COMMODITY_LAKE_ROOT` to use a different local lake. See
+[dashboard usage and analytics](docs/dashboard.md) for controls, data formats
+and metric definitions.
 
 ## Documentation
 

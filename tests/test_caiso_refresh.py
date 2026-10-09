@@ -16,7 +16,7 @@ from comm_research.infra.scrapers.caiso.oasis import (
     NoDataError,
 )
 from comm_research.infra.scrapers.caiso.oasis.models import CategoryScraper, Report
-from comm_research.infra.scrapers.caiso.oasis.prices import DAM_LMP
+from comm_research.infra.scrapers.caiso.oasis.prices import DAM_LMP, RTM_LMP
 from comm_research.infra.tools.caiso_normalizer import normalize_csvs, read_csv
 from comm_research.infra.tools.lake_methods import _clear_raw
 from comm_research.markets.power_gas.napg.caiso import caiso_oasis_pipeline as pipeline
@@ -254,6 +254,14 @@ class RefreshTests(unittest.TestCase):
         lower, upper = pipeline._bounds(bid, date(2000, 1, 1), today, today)
         self.assertEqual(lower, date(2023, 7, 9))
         self.assertEqual(upper, today - timedelta(days=90))
+        self.assertEqual(
+            pipeline._bounds(RTM_LMP, today, today, today),
+            (today, today),
+        )
+        self.assertEqual(
+            pipeline._bounds(RTM_LMP, today, today + timedelta(days=1), today),
+            (today, today + timedelta(days=1)),
+        )
         csp = SCRAPERS["resource_adequacy"].reports[1]
         self.assertEqual(pipeline._bounds(csp, None, today, today)[1], date(2025, 7, 1))
 

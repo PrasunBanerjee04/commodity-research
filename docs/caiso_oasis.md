@@ -32,7 +32,7 @@ keyword arguments to `run()` override them. Importing the module does not downlo
 | `CATEGORIES` | Category modules to include; defaults to all eight. |
 | `DATASETS` | Dataset names to include; `None` selects every defined report. See the [catalog](caiso_oasis_reports.md). |
 | `START_DATE` | Inclusive date; `None` starts at each report's rolling retention floor. |
-| `IGNORE_END_DATE` | `True` uses today, excluding the incomplete current day. |
+| `IGNORE_END_DATE` | `True` uses today's date as the exclusive end, excluding the current day. |
 | `END_DATE` | Exclusive end date when `IGNORE_END_DATE=False`. CLI `--end` sets both. |
 | `RETENTION_MONTHS` | Backfill limit, default 39 calendar months, clamped to report availability. |
 | `NODES` | Explicit price nodes; defaults to SP15 and NP15. |
@@ -48,7 +48,9 @@ cutoff. Reports launched more recently can return no data within the retention
 window. Such dates remain eligible for later attempts.
 
 Pipeline dates are Pacific trading dates. Requests convert boundaries to UTC,
-preserving 23/25-hour daylight saving days; the default end uses Pacific today.
+preserving 23/25-hour daylight saving days. The default end excludes today;
+an explicit next-day `--end` can include today's zero-lag reports, such as RTM,
+while reports with publication delays retain their delay cutoff.
 The low-level SingleZip client also accepts arbitrary timezone-aware boundaries. Current transmission usage is a fresh current-day snapshot and
 cannot be backfilled. The client limits DAM windows to at most 15 days and RTM
 to one day; the incremental pipeline requests individual days for checkpoints.

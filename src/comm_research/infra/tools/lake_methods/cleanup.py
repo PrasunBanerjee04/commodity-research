@@ -41,7 +41,7 @@ def _clear_raw(
 
     clear(root)
     logger.info(
-        "Raw cleanup: removed %d file(s); retained %d failed input(s)",
+        "Raw cleanup: removed %d file(s); retained %d protected input(s)",
         removed,
         len(protected),
     )

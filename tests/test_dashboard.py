@@ -1,33 +1,27 @@
-"""Analytics and workspace regressions. Install the optional dashboard extra."""
+"""Analytics and HTTP dashboard regressions. Install the optional dashboard extra."""
 
 from __future__ import annotations
 
-import base64
 import importlib.util
 import json
-import os
 import tempfile
+import threading
 import unittest
 from datetime import date, datetime, timedelta, timezone
+from functools import partial
+from http.server import ThreadingHTTPServer
 from pathlib import Path
 from unittest.mock import patch
+from urllib.error import HTTPError
+from urllib.request import Request, urlopen
 
 import polars as pl
 
-HAS_DASHBOARD = all(
-    importlib.util.find_spec(name) is not None
-    for name in ("streamlit", "plotly", "pyarrow")
-)
-if HAS_DASHBOARD:
-    from streamlit.testing.v1 import AppTest
+HAS_DASHBOARD = importlib.util.find_spec("pyarrow") is not None
 
-    from comm_research.dashboard.config.taxonomy import display_name
-    from comm_research.dashboard.data import loader
-    from comm_research.dashboard.ui.components import build_chart
-    from comm_research.dashboard.ui.theme import THEMES
-    from comm_research.dashboard.ui.workspace import decode_workspace, panel_key
-
-ROOT = Path(__file__).resolve().parents[1]
+from comm_research.dashboard.app import DashboardHandler
+from comm_research.dashboard.config.taxonomy import display_name
+from comm_research.dashboard.data import loader
 
 
 def price_data(
@@ -73,7 +67,7 @@ class LoaderTests(unittest.TestCase):
             table.write_parquet(path)
         else:
             table.write_ipc(path)
-        loader.discover_lake.clear()
+        loader.clear_caches()
         return path
 
     def dataset(self, key: str):
@@ -201,13 +195,30 @@ class LoaderTests(unittest.TestCase):
             before, date(2024, 1, 1), date(2024, 1, 1), "UTC", ("value:LMP",)
         )
         price_data(hours=3).write_parquet(path)
-        loader.discover_lake.clear()
+        loader.clear_caches()
         after = self.dataset("prices")
         after_result = loader.load_series(
             after, date(2024, 1, 1), date(2024, 1, 1), "UTC", ("value:LMP",)
         )
         self.assertNotEqual(before.files, after.files)
         self.assertEqual((before_result.points, after_result.points), (2, 3))
+
+    def test_dated_queries_skip_distant_hive_files_but_keep_unpartitioned_files(self):
+        self.write("prices", price_data(hours=2))
+        distant = self.root / "prices/year=2024/month=01/day=20/data.parquet"
+        distant.parent.mkdir(parents=True)
+        price_data(hours=2).write_parquet(distant)
+        unpartitioned = self.root / "prices/unpartitioned.parquet"
+        price_data(hours=2).write_parquet(unpartitioned)
+        loader.clear_caches()
+        dataset = self.dataset("prices")
+        scan_parquet = pl.scan_parquet
+        with patch.object(loader.pl, "scan_parquet", wraps=scan_parquet) as scan:
+            loader._scan(dataset, date(2024, 1, 1), date(2024, 1, 1))
+        scanned_paths = {Path(call.args[0]).resolve() for call in scan.call_args_list}
+        self.assertIn(unpartitioned.resolve(), scanned_paths)
+        self.assertEqual(len(scanned_paths), 2)
+        self.assertNotIn(distant.resolve(), scanned_paths)
 
     def test_schema_evolution_and_raw_pagination_keep_identifiers(self):
         table = pl.DataFrame(
@@ -229,7 +240,7 @@ class LoaderTests(unittest.TestCase):
         second = self.root / "prices/year=2024/month=01/day=02/data.parquet"
         second.parent.mkdir(parents=True)
         evolved.write_parquet(second)
-        loader.discover_lake.clear()
+        loader.clear_caches()
         self.assertIn(
             "volume", dict(loader.inspect_dataset(self.dataset("prices")).schema)
         )
@@ -275,143 +286,124 @@ class LoaderTests(unittest.TestCase):
         with self.assertRaises(loader.LakeError):
             loader.inspect_dataset(dataset)
 
-    def test_chart_uses_utc_axis_transparency_crosshairs_and_range_controls(self):
-        self.write("prices", price_data())
-        bundle = loader.load_series(
-            self.dataset("prices"),
-            date(2024, 1, 1),
-            date(2024, 1, 2),
-            "UTC",
-            ("value:LMP",),
-        )
-        figure = build_chart(bundle, THEMES["Dark"], "America/Los_Angeles")
-        self.assertEqual(figure.layout.plot_bgcolor, "rgba(0,0,0,0)")
-        self.assertEqual(figure.layout.hovermode, "x unified")
-        self.assertTrue(figure.layout.xaxis.showspikes)
-        self.assertEqual(
-            [button.label for button in figure.layout.xaxis.rangeselector.buttons],
-            ["1D", "5D", "1M", "YTD", "ALL"],
-        )
-        self.assertEqual(figure.data[0].x[0].utcoffset(), timedelta(0))
-
-
 @unittest.skipUnless(HAS_DASHBOARD, "Install .[dashboard] to run dashboard checks")
-class WorkspaceTests(unittest.TestCase):
+class DashboardApiTests(unittest.TestCase):
     def setUp(self):
         self.temporary = tempfile.TemporaryDirectory()
         self.addCleanup(self.temporary.cleanup)
         self.root = Path(self.temporary.name)
-        for feed, column in (("dam_lmp", "mw"), ("rtm_lmp", "value")):
-            path = (
-                self.root
-                / "power_gas/napg/caiso"
-                / feed
-                / "year=2024/month=01/day=01/data.parquet"
-            )
-            path.parent.mkdir(parents=True)
-            price_data(column, hours=40 * 24, nodes=("SP15",)).write_parquet(path)
-        self.env = patch.dict(os.environ, {"COMMODITY_LAKE_ROOT": str(self.root)})
-        self.env.start()
-        self.addCleanup(self.env.stop)
-        self.dam = "power_gas/napg/caiso/dam_lmp"
-        self.rtm = "power_gas/napg/caiso/rtm_lmp"
-
-    def app(self):
-        return AppTest.from_file(str(ROOT / "app.py"), default_timeout=30).run()
-
-    def test_panel_controls_layout_theme_close_reopen_and_browser_reload(self):
-        app = self.app()
-        self.assertEqual(len(app.exception), 0)
-        self.assertEqual(app.session_state["active_panels"], [self.dam, self.rtm])
-        self.assertEqual(
-            app.date_input(key=panel_key(self.dam, "start")).value, date(2024, 1, 11)
+        self.feed = "power_gas/napg/caiso/dam_lmp"
+        path = (
+            self.root
+            / self.feed
+            / "year=2024/month=01/day=01/data.parquet"
         )
-        app.multiselect(key=panel_key(self.dam, "signals")).set_value(
-            ["mw:LMP", "mw:MCC"]
-        ).run()
-        app.get("segmented_control")[0].set_value("Split 1×2").run()
-        self.assertEqual(len(app.exception), 0)
-        self.assertEqual(
-            app.multiselect(key=panel_key(self.dam, "signals")).value,
-            ["mw:LMP", "mw:MCC"],
+        path.parent.mkdir(parents=True)
+        price_data("mw", hours=48, nodes=("SP15", "NP15")).write_parquet(path)
+        loader.clear_caches()
+        handler = partial(DashboardHandler, lake_root=str(self.root))
+        self.server = ThreadingHTTPServer(("127.0.0.1", 0), handler)
+        self.thread = threading.Thread(target=self.server.serve_forever, daemon=True)
+        self.thread.start()
+        self.addCleanup(self.server.server_close)
+        self.addCleanup(self.thread.join, 2)
+        self.addCleanup(self.server.shutdown)
+        self.base_url = f"http://127.0.0.1:{self.server.server_port}"
+
+    def get(self, path):
+        with urlopen(self.base_url + path, timeout=5) as response:
+            return response.status, response.headers, response.read()
+
+    def post(self, path, payload):
+        request = Request(
+            self.base_url + path,
+            data=json.dumps(payload).encode(),
+            headers={"Content-Type": "application/json"},
+            method="POST",
         )
-        self.assertEqual(len(app.date_input), 4)
-        app.selectbox(key="desk_theme").select("Light").run()
-        self.assertEqual(len(app.exception), 0)
-        app.button(key=panel_key(self.rtm, "close")).click().run()
-        self.assertEqual(app.session_state["active_panels"], [self.dam])
-        app.button(key="open:" + self.rtm).click().run()
-        self.assertEqual(app.session_state["active_panels"], [self.dam, self.rtm])
-        encoded = app.query_params["workspace"]
-        restored = AppTest.from_file(str(ROOT / "app.py"), default_timeout=30)
-        restored.query_params["workspace"] = encoded
-        restored.run()
-        self.assertEqual(len(restored.exception), 0)
-        self.assertEqual(restored.session_state["desk_theme"], "Light")
-        self.assertEqual(restored.session_state["desk_view"], "Split 1×2")
+        try:
+            response = urlopen(request, timeout=10)
+        except HTTPError as error:
+            return error.code, error.headers, error.read()
+        with response:
+            return response.status, response.headers, response.read()
+
+    def test_dashboard_assets_and_catalog_are_served_without_external_runtime(self):
+        status, _, html = self.get("/")
+        self.assertEqual(status, 200)
+        self.assertIn(b"/src/main.js", html)
+        self.assertIn(b"Commodities Analytics Dashboard", html)
+        status, headers, script = self.get("/src/main.js")
+        self.assertEqual(status, 200)
+        self.assertEqual(headers["Content-Security-Policy"].split(";")[0], "default-src 'self'")
+        self.assertIn(b"DockManager", script)
+        self.assertIn("script-src 'self'", headers["Content-Security-Policy"])
+        status, _, stylesheet = self.get("/styles/theme.css")
+        self.assertEqual(status, 200)
+        self.assertIn(b"--bg-primary: #131722", stylesheet)
+        for asset in ("/vendor/dockview.min.js", "/vendor/uPlot.iife.min.js"):
+            status, asset_headers, content = self.get(asset)
+            self.assertEqual(status, 200)
+            self.assertTrue(asset_headers["Content-Type"].startswith("text/javascript"))
+            self.assertTrue(content)
+        status, _, body = self.get("/api/datasets")
+        self.assertEqual(status, 200)
+        datasets = json.loads(body)
+        self.assertEqual(datasets[0]["key"], self.feed)
+        self.assertEqual(datasets[0]["files"], 1)
+
+    def test_metadata_and_options_describe_dam_signals_and_series(self):
+        status, _, body = self.get(f"/api/metadata?key={self.feed}")
+        self.assertEqual(status, 200)
+        metadata = json.loads(body)
+        self.assertEqual(metadata["dataset"]["title"], "CAISO / Day-Ahead LMP")
         self.assertEqual(
-            restored.multiselect(key=panel_key(self.dam, "signals")).value,
-            ["mw:LMP", "mw:MCC"],
+            [signal["label"] for signal in metadata["signals"]],
+            ["LMP", "Energy", "Congestion", "Losses", "GHG"],
         )
+        status, _, body = self.get(f"/api/options?key={self.feed}&dimension=node")
+        self.assertEqual(status, 200)
+        self.assertEqual(json.loads(body)["values"], ["NP15", "SP15"])
 
-    def test_tabs_remount_without_losing_panel_horizons(self):
-        app = self.app()
-        app.date_input(key=panel_key(self.dam, "start")).set_value(
-            date(2024, 1, 20)
-        ).run()
-        app.session_state["workspace_tabs"] = "CAISO / Real-Time LMP"
-        app.run()
-        self.assertEqual(len(app.exception), 0)
-        self.assertEqual(app.multiselect[0].value, ["value:LMP"])
-        app.session_state["workspace_tabs"] = "CAISO / Day-Ahead LMP"
-        app.run()
-        self.assertEqual(
-            app.date_input(key=panel_key(self.dam, "start")).value, date(2024, 1, 20)
-        )
-
-    def test_four_panel_grid_and_overflow_preserve_existing_feeds(self):
-        for index in range(3):
-            path = self.root / f"oil/test/prices_{index}/data.parquet"
-            path.parent.mkdir(parents=True)
-            price_data(hours=48, nodes=("CL",)).write_parquet(path)
-        loader.discover_lake.clear()
-        app = self.app()
-        app.get("segmented_control")[0].set_value("Split 2×2").run()
-        for index in range(3):
-            app.button(key=f"open:oil/test/prices_{index}").click().run()
-        self.assertEqual(len(app.exception), 0)
-        self.assertEqual(len(app.session_state["active_panels"]), 5)
-        self.assertEqual(app.session_state["grid_page"], 1)
-        self.assertEqual(len(app.date_input), 2)
-        app.selectbox(key="grid_page").select(0).run()
-        self.assertEqual(len(app.date_input), 8)
-        self.assertEqual(app.session_state["active_panels"][:2], [self.dam, self.rtm])
-
-    def test_raw_view_pagination_and_schema(self):
-        app = self.app()
-        app.get("segmented_control")[1].set_value("Raw data").run()
-        self.assertEqual(len(app.exception), 0)
-        self.assertEqual(len(app.dataframe), 2)
-        self.assertEqual(app.dataframe[0].value.shape[0], 250)
-        app.button(key=panel_key(self.dam, "next")).click().run()
-        self.assertEqual(app.session_state[panel_key(self.dam, "page")], 1)
-
-    def test_bad_workspace_url_is_ignored_and_panel_limit_is_bounded(self):
-        for value in (
-            "not-base64",
-            base64.urlsafe_b64encode(b"[]").decode(),
-            "a" * 16_001,
-        ):
-            self.assertEqual(decode_workspace(value), {})
-        payload = {
-            "version": 1,
-            "active": [f"dataset{i}" for i in range(20)],
-            "panels": [],
+    def test_series_endpoint_returns_metrics_and_rejects_invalid_controls(self):
+        request = {
+            "key": self.feed,
+            "start": "2024-01-01",
+            "end": "2024-01-02",
+            "zone": "UTC",
+            "signals": ["mw:LMP"],
+            "filters": {"node": ["SP15"]},
+            "frequency": "native",
+            "aggregation": "Mean",
         }
-        encoded = base64.urlsafe_b64encode(json.dumps(payload).encode()).decode()
-        result = decode_workspace(encoded)
-        self.assertEqual(len(result["active"]), 12)
-        self.assertEqual(result["panels"], {})
+        status, _, body = self.post("/api/series", request)
+        self.assertEqual(status, 200)
+        result = json.loads(body)
+        self.assertEqual(result["observations"], 48)
+        self.assertEqual(result["statistics"][0]["series"], "LMP · SP15 · DAM")
+        self.assertEqual(result["statistics"][0]["last"], 57)
+        request["zone"] = ["not-a-zone"]
+        status, _, body = self.post("/api/series", request)
+        self.assertEqual(status, 400)
+        self.assertIn("date zone", json.loads(body)["error"])
+
+    def test_raw_rows_are_paged_and_rescan_refreshes_discovery(self):
+        request = {
+            "key": self.feed,
+            "start": "2024-01-01",
+            "end": "2024-01-01",
+            "zone": "UTC",
+            "filters": {"node": ["SP15"]},
+            "page": 1,
+            "pageSize": 100,
+        }
+        status, _, body = self.post("/api/rows", request)
+        self.assertEqual(status, 200)
+        result = json.loads(body)
+        self.assertEqual(result["count"], 120)
+        self.assertEqual(len(result["rows"]), 20)
+        self.assertEqual(result["rows"][0]["node"], "SP15")
+        self.assertEqual(self.post("/api/rescan", {})[0], 200)
 
 
 if __name__ == "__main__":
