@@ -1,6 +1,6 @@
 # Commodity Research
 
-A Python workspace for commodity data, analytics, and market-specific research.
+A Python workspace for commodity data, analytics, and market-specific research. All views and research in this repository are my own and sourced from public materials and data. 
 
 ## Project layout
 
@@ -44,9 +44,26 @@ timestamps, locations, and symbols in the Parquet data rather than adding them t
 the directory path. Forecast datasets can use `run_date=YYYY-MM-DD/` when forecast
 runs need to remain distinct.
 
+## CAISO OASIS ingestion
+
+The incremental runner covers eight OASIS categories, streams progress to the
+terminal, and resumes downloads into daily Parquet partitions. Install and run a
+three-day SP15 day-ahead price sample:
+
+```bash
+python -m venv .venv
+.venv/bin/python -m pip install -e .
+.venv/bin/python -m comm_research.markets.power_gas.napg.caiso.caiso_oasis_pipeline \
+  --categories prices --datasets dam_lmp --nodes TH_SP15_GEN-APND \
+  --start 2026-10-01 --end 2026-10-04
+```
+
+See [OASIS usage and data fields](docs/caiso_oasis.md) for `run()` configuration,
+retention/publication limits, recovery, storage, and the report catalog.
+
 ## Documentation
 
-See the docs/ folder for documentation on different infrastructure or model components
+See [docs/](docs/) for infrastructure and model documentation.
 
 ## Markets
 
