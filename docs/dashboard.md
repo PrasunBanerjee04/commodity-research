@@ -31,8 +31,9 @@ metrics, and uPlot chart. The node picker supports multiple selections and defau
 node. Empty default horizons reanchor to that selected series' latest data. **UPDATE**
 refreshes that panel. The
 **LIGHT**/**DARK** control switches the workstation palette; charts redraw with
-the active theme. The initial panel opens the first discovered feed if no saved
-layout is present.
+the active theme. A fresh workspace opens CAISO Day-Ahead and Real-Time LMP side
+by side when both are available; otherwise it opens the available LMP feed or
+first discovered feed. Saved workspace layouts are preserved.
 
 ## Signals and analytics
 
@@ -138,3 +139,25 @@ changes and reloads. Selecting no nodes/components intentionally clears the char
 If the default **1M** horizon contains no observations for the selected series,
 the app reanchors to that series' latest available timestamp, updates the dates,
 and displays a notice. Explicit custom horizons stay empty when no data matches.
+
+## Rendering and diagnostics
+
+Default dates use the actual latest timestamp in the local lake, rather than
+today. Saved date windows outside the dataset's bounds reset to its latest month.
+Charts wait for a nonzero viewport before initializing and resize when tabs,
+splits, the navigator, or the browser window change. Each chart has a 250px
+minimum height; smaller panes scroll vertically instead of collapsing.
+
+Loading, empty results (`NO_RECORDS_FOUND_FOR_DATE_RANGE`), HTTP/data failures
+(`DATA_FETCH_ERROR`), and chart failures (`CHART_RENDER_ERROR`) appear directly
+inside the viewport. Missing vendored chart/workspace libraries display
+`ERR_DEPENDENCY_LOAD_FAILED`. **UPDATE** retries a data request. Libraries load
+synchronously from the local server before workspace initialization.
+
+Run `npm test` for browser-module checks. To run the rendering regressions with
+a real browser, install Playwright (`python -m pip install playwright`) and
+Chromium (`python -m playwright install chromium`), then run
+`python -m unittest discover -s tests -p test_dashboard_browser.py -v`.
+Alternatively set `DASHBOARD_CHROMIUM=/path/to/chromium` to use an installed
+browser. These tests create an isolated lake and HTTP server; they do not change
+the user's lake or download market data.

@@ -2,6 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { DockManager, canonicalDatasetPath } from '../src/comm_research/dashboard/ui/src/dock_manager.js';
 import { traceStyle } from '../src/comm_research/dashboard/ui/src/chart_panel.js';
+import { request } from '../src/comm_research/dashboard/ui/src/api.js';
 
 class View {
   constructor() { this.panels = []; this.callbacks = {}; }
@@ -57,4 +58,26 @@ test('node hue is stable across components and congestion is dashed', () => {
   assert.equal(new Set(styles.map(style => style.stroke.slice(0,7))).size, 1);
   assert.equal(styles[0].stroke.slice(0,7), '#2962FF'); assert.deepEqual(styles[2].dash, [6,4]);
   assert.equal(traceStyle({ node:'TH_SP15_GEN-APND', component:'LMP' }).stroke.slice(0,7), '#089981');
+});
+
+test('HTTP status survives an HTML error response', async () => {
+  const original = global.fetch;
+  try {
+    global.fetch = async () => new Response('<h1>Not Found</h1>', { status: 404, statusText: 'Not Found' });
+    await assert.rejects(request('/api/series'), /HTTP 404: Not Found/);
+  } finally { global.fetch = original; }
+});
+test('JSON errors retain both the status and API explanation', async () => {
+  const original = global.fetch;
+  try {
+    global.fetch = async () => new Response('{"error":"Lake unavailable"}', { status: 503 });
+    await assert.rejects(request('/api/series'), /HTTP 503: Lake unavailable/);
+  } finally { global.fetch = original; }
+});
+test('a malformed successful response produces a clear data error', async () => {
+  const original = global.fetch;
+  try {
+    global.fetch = async () => new Response('not JSON');
+    await assert.rejects(request('/api/series'), /Invalid JSON response from the data API/);
+  } finally { global.fetch = original; }
 });

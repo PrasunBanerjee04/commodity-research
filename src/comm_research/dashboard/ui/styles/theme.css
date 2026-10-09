@@ -38,14 +38,20 @@ body.light {
 html,
 body {
   width: 100%;
-  height: 100%;
+  height: 100vh;
+  max-height: 100vh;
   min-width: 600px;
-  min-height: 360px;
+  min-height: 0;
   margin: 0;
   overflow: hidden;
   background: var(--bg-primary);
   color: var(--text-main);
   font: 12px var(--font-sans);
+}
+
+body {
+  display: flex;
+  flex-direction: column;
 }
 
 button,
@@ -70,6 +76,7 @@ summary:focus-visible {
 .workstation-ribbon {
   display: flex;
   height: 32px;
+  flex: 0 0 32px;
   align-items: center;
   justify-content: space-between;
   border-bottom: 1px solid var(--border-subtle);
@@ -123,6 +130,7 @@ summary:focus-visible {
   display: flex;
   width: 100%;
   height: calc(100% - 32px);
+  flex: 1 1 auto;
   min-height: 0;
 }
 
@@ -317,8 +325,9 @@ summary:focus-visible {
   min-width: 0;
   min-height: 0;
   flex-direction: column;
-  overflow: hidden;
-  background: var(--bg-primary);
+  overflow-x: hidden;
+  overflow-y: auto;
+  background: var(--bg-panel);
 }
 
 .panel-toolbar {
@@ -489,13 +498,16 @@ summary:focus-visible {
 .panel-chart {
   position: relative;
   min-width: 0;
-  min-height: 0;
-  flex: 1;
+  min-height: 250px;
+  width: 100%;
+  flex: 1 0 250px;
 }
 
 .chart-mount {
   position: absolute;
   inset: 0;
+  width: 100%;
+  height: 100%;
 }
 
 .chart-empty {
@@ -503,9 +515,17 @@ summary:focus-visible {
   inset: 0;
   display: grid;
   place-items: center;
+  z-index: 3;
+  padding: 12px;
+  overflow-wrap: anywhere;
+  background: var(--bg-panel);
   color: var(--text-empty);
   font: 11px var(--font-mono);
   text-align: center;
+}
+
+.chart-empty.is-error {
+  color: var(--desk-red);
 }
 
 .chart-empty[hidden] {
@@ -571,4 +591,4 @@ summary:focus-visible {
 .chart-legend button { border:1px solid var(--border-subtle); border-left:3px solid var(--trace-color); padding:2px 5px; background:var(--bg-panel); color:var(--text-main); font:9px var(--font-mono); }
 .chart-legend button[aria-pressed="false"] { opacity:.45; text-decoration:line-through; }
 /* Picker overlays must escape the horizontally scrolling toolbar. */
-.signal-options { position:fixed; inset:auto; }
+.signal-options { position:fixed; inset:auto; max-width:calc(100vw - 16px); }

@@ -90,11 +90,12 @@ export class ChartPanel {
     this.hiddenSeries = new Set(this.settings.hiddenSeries || []);
     this.filters = {};
     this.resizeObserver = null;
+    this.resizeFrame = null;
     this.disposed = false;
     this.signals = [];
     this.lastRows = [];
     this.requestSequence = 0;
-    this.themeListener = () => this.renderChart(this.lastRows);
+    this.themeListener = () => { if (this.lastRows.length) this.renderChart(this.lastRows); };
   }
 
   async init() {
@@ -116,10 +117,10 @@ export class ChartPanel {
         <button class="panel-update" type="button">UPDATE</button>
       </div>
       <div class="panel-metrics" aria-label="Market metrics"></div>
-      <section class="panel-chart">
+      <section class="panel-chart chart-viewport" aria-label="Chart viewport">
         <div class="chart-mount"></div>
         <div class="chart-legend" role="group" aria-label="Chart legend"></div>
-        <div class="chart-empty" hidden>NO_DATA_AVAILABLE_FOR_FILTER_RANGE</div>
+        <div class="chart-empty" role="status">LOADING_DATA…</div>
       </section>
       <div class="panel-error" role="status"></div>
     `;
@@ -134,6 +135,12 @@ export class ChartPanel {
     this.componentRibbon = this.container.querySelector(".component-ribbon");
     this.legend = this.container.querySelector(".chart-legend");
     this.dimensionControls = this.container.querySelector(".dimension-controls");
+    this.container.addEventListener("toggle", () => this.positionPickers(), true);
+    this.container.querySelector(".panel-toolbar").addEventListener("scroll", () => this.positionPickers());
+    // Observe before awaiting metadata: tabs may mount while hidden or before layout.
+    this.resizeObserver = new ResizeObserver(() => this.resizeChart());
+    this.resizeObserver.observe(this.mount);
+    document.addEventListener("commodities-theme-change", this.themeListener);
 
     this.container.querySelector(".panel-update").addEventListener("click", () => this.refresh());
     this.container.querySelectorAll("[data-range]").forEach((button) => {
@@ -173,15 +180,16 @@ export class ChartPanel {
     });
 
     try {
+      if (typeof window.uPlot !== "function") {
+        this.showError(new Error("ERR_DEPENDENCY_LOAD_FAILED: uPlot missing"));
+        return;
+      }
       this.metadata = await loadMetadata(this.dataset.key);
       if (this.disposed) return;
       this.configureDates();
       this.configureSignals();
       await this.configureDimensions();
       if (this.disposed) return;
-      this.resizeObserver = new ResizeObserver(() => this.resizeChart());
-      this.resizeObserver.observe(this.container.querySelector(".panel-chart"));
-      document.addEventListener("commodities-theme-change", this.themeListener);
       await this.refresh();
     } catch (error) {
       if (!this.disposed) this.showError(error);
@@ -200,13 +208,11 @@ export class ChartPanel {
     this.startInput.max = latest;
     this.endInput.min = earliest;
     this.endInput.max = latest;
-    this.endInput.value = this.settings.end && this.settings.end <= latest
-      ? this.settings.end
-      : latest;
-    this.startInput.value = this.settings.start && this.settings.start >= earliest
-      ? this.settings.start
-      : earliest;
-    const initialRange = this.settings.range === undefined ? "1M" : this.settings.range;
+    const validSavedRange = this.settings.start >= earliest && this.settings.end <= latest
+      && this.settings.start <= this.settings.end;
+    this.endInput.value = validSavedRange ? this.settings.end : latest;
+    this.startInput.value = validSavedRange ? this.settings.start : earliest;
+    const initialRange = this.settings.range === undefined || !validSavedRange ? "1M" : this.settings.range;
     this.setRangeActive(initialRange);
     if (initialRange && initialRange !== "ALL") this.applyRange(initialRange, false);
   }
@@ -343,6 +349,16 @@ export class ChartPanel {
     this.signalLabel.textContent = count ? `SIGNALS ${count}` : "SIGNALS 0";
   }
 
+  positionPickers() {
+    for (const picker of this.container.querySelectorAll(".signal-picker[open]")) {
+      const options = picker.querySelector(".signal-options");
+      const anchor = picker.querySelector("summary").getBoundingClientRect();
+      options.style.maxHeight = `${Math.min(240, Math.max(60, window.innerHeight - 16))}px`;
+      options.style.left = `${Math.max(8, Math.min(anchor.left, window.innerWidth - options.offsetWidth - 8))}px`;
+      options.style.top = `${Math.max(8, Math.min(anchor.bottom + 2, window.innerHeight - options.offsetHeight - 8))}px`;
+    }
+  }
+
   async persistAndRefresh() {
     this.settings = {
       ...this.settings,
@@ -370,10 +386,11 @@ export class ChartPanel {
     const signals = this.selectedSignals();
     this.settings.signals = signals;
     this.updateSignalLabel();
-    if (!this.startInput.value || !this.endInput.value) {
+    if (!this.startInput.value || !this.endInput.value || this.startInput.value > this.endInput.value) {
       this.showError(new Error("Select a valid date range."));
       return;
     }
+    this.showState("LOADING_DATA…");
     try {
       const result = await loadSeries({
         key: this.dataset.key,
@@ -387,6 +404,7 @@ export class ChartPanel {
         fallbackToLatest: this.settings.range === "1M",
       });
       if (this.disposed || requestSequence !== this.requestSequence) return;
+      if (!result || !Array.isArray(result.plot)) throw new Error("Invalid series response from the data API.");
       if (result.fallbackHorizon) {
         [this.startInput.value, this.endInput.value] = result.fallbackHorizon;
         this.error.textContent = "Default horizon was empty; showing the latest available selected series.";
@@ -427,11 +445,31 @@ export class ChartPanel {
   }
 
   renderChart(rows) {
+    try {
+      this.drawChart(rows);
+    } catch (error) {
+      this.showError(error, "CHART_RENDER_ERROR");
+    }
+  }
+
+  drawChart(rows) {
+    if (this.disposed) return;
     this.lastRows = rows;
     this.destroyChart();
     this.legend.replaceChildren();
     if (!rows.length) {
-      this.empty.hidden = false;
+      this.showState("NO_RECORDS_FOUND_FOR_DATE_RANGE");
+      return;
+    }
+    if (typeof window.uPlot !== "function") {
+      this.showError(new Error("ERR_DEPENDENCY_LOAD_FAILED: uPlot missing"));
+      return;
+    }
+    // Never initialize the chart at 1x1 while Dockview is measuring/activating a tab.
+    const width = this.mount.clientWidth;
+    const height = this.mount.clientHeight;
+    if (width <= 0 || height <= 0) {
+      this.showState("WAITING_FOR_VIEWPORT…");
       return;
     }
     this.empty.hidden = true;
@@ -446,8 +484,6 @@ export class ChartPanel {
       timestamps,
       ...labels.map((label) => timestamps.map((timestamp) => valuesBySeries.get(label).get(timestamp) ?? null)),
     ];
-    const width = Math.max(1, this.mount.clientWidth);
-    const height = Math.max(1, this.mount.clientHeight);
     const rootStyles = getComputedStyle(document.body);
     const text = rootStyles.getPropertyValue("--text-muted").trim();
     const grid = rootStyles.getPropertyValue("--grid-line").trim();
@@ -508,10 +544,21 @@ export class ChartPanel {
   }
 
   resizeChart() {
-    if (!this.chart || this.disposed) return;
-    const width = this.mount.clientWidth;
-    const height = this.mount.clientHeight;
-    if (width > 0 && height > 0) this.chart.setSize({ width, height });
+    if (this.disposed || this.resizeFrame !== null) return;
+    this.resizeFrame = requestAnimationFrame(() => {
+      this.resizeFrame = null;
+      if (this.disposed || !this.mount) return;
+      this.positionPickers();
+      const width = this.mount.clientWidth;
+      const height = this.mount.clientHeight;
+      if (width <= 0 || height <= 0) return;
+      try {
+        if (this.chart) this.chart.setSize({ width, height });
+        else if (this.lastRows.length) this.renderChart(this.lastRows);
+      } catch (error) {
+        this.showError(error, "CHART_RENDER_ERROR");
+      }
+    });
   }
 
   destroyChart() {
@@ -521,7 +568,19 @@ export class ChartPanel {
     }
   }
 
-  showError(error) {
+  showState(message, error = false) {
+    this.empty.textContent = message;
+    this.empty.classList.toggle("is-error", error);
+    this.empty.hidden = false;
+  }
+
+  showError(error, code = "DATA_FETCH_ERROR") {
+    console.error(code, error);
+    this.lastRows = [];
+    this.destroyChart();
+    this.legend.replaceChildren();
+    this.metrics.replaceChildren();
+    this.showState(error.message.startsWith("ERR_DEPENDENCY_LOAD_FAILED") ? error.message : `${code}: ${error.message}`, true);
     this.error.textContent = error.message;
     this.onError?.(error);
   }
@@ -534,6 +593,7 @@ export class ChartPanel {
     this.disposed = true;
     document.removeEventListener("commodities-theme-change", this.themeListener);
     this.resizeObserver?.disconnect();
+    if (this.resizeFrame !== null) cancelAnimationFrame(this.resizeFrame);
     this.destroyChart();
   }
 }

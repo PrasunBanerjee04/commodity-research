@@ -25,6 +25,9 @@ export class DockManager {
     this.datasets = [];
     this.openPanels = new Map();
     this.rebuilding = false;
+    if (typeof window.dockview?.DockviewComponent !== "function") {
+      throw new Error("ERR_DEPENDENCY_LOAD_FAILED: Dockview missing");
+    }
     this.view = new window.dockview.DockviewComponent(mount, {
       theme: window.dockview.themeDark,
       createComponent: ({ id }) => {
@@ -37,6 +40,7 @@ export class DockManager {
             chartPanel = new ChartPanel(dataset, element, this.onError, params.settingsKey || id);
             return chartPanel.init();
           },
+          layout: () => chartPanel?.resizeChart(),
           dispose: () => chartPanel?.dispose(),
         };
       },

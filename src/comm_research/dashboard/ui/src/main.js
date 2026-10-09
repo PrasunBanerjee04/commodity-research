@@ -11,19 +11,22 @@ function showStatus(error) {
   status.textContent = error.message;
 }
 
-const dock = new DockManager({
-  mount: document.querySelector("#dockview"),
-  emptyState: document.querySelector("#empty-workspace"),
-  onError: showStatus,
-});
-const tree = new TreeNavigator({
-  root: datasetTree,
-  search: document.querySelector("#dataset-search"),
-  count: datasetCount,
-  onOpen: (dataset) => {
-    dock.openPanel(dataset);
-  },
-});
+let dock;
+let tree;
+
+function initializeWorkspace() {
+  dock = new DockManager({
+    mount: document.querySelector("#dockview"),
+    emptyState: document.querySelector("#empty-workspace"),
+    onError: showStatus,
+  });
+  tree = new TreeNavigator({
+    root: datasetTree,
+    search: document.querySelector("#dataset-search"),
+    count: datasetCount,
+    onOpen: (dataset) => dock.openPanel(dataset),
+  });
+}
 
 function setTheme(theme) {
   localStorage.setItem("commodity-theme", theme);
@@ -38,10 +41,16 @@ async function updateCatalog(datasets) {
     showStatus(new Error("No data lake feeds were discovered."));
     return;
   }
-  if (dock.view.totalPanels === 0) dock.openPanel(datasets[0]);
+  if (dock.view.totalPanels === 0) {
+    const dam = datasets.find(dataset => /\/caiso\/(dam_lmp|da_lmp)$/.test(dataset.key));
+    const rtm = datasets.find(dataset => /\/caiso\/(rtm_lmp|rt_lmp)$/.test(dataset.key));
+    const first = dock.openPanel(dam || rtm || datasets[0]);
+    if (dam && rtm) dock.openPanel(rtm, { referencePanel: first.id, direction: "right" });
+  }
 }
 
 try {
+  initializeWorkspace();
   const theme = localStorage.getItem("commodity-theme") || "dark";
   dock.setTheme(theme);
   document.querySelector("#theme-toggle").addEventListener("click", () => {
@@ -67,5 +76,11 @@ try {
   });
   await updateCatalog(await loadCatalog());
 } catch (error) {
+  console.error("Workspace initialization failed", error);
   showStatus(error);
+  if (!dock || dock.view.totalPanels === 0) {
+    const emptyState = document.querySelector("#empty-workspace");
+    emptyState.replaceChildren(document.createTextNode(`WORKSPACE_LOAD_ERROR: ${error.message}`));
+    emptyState.hidden = false;
+  }
 }
