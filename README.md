@@ -46,8 +46,7 @@ runs need to remain distinct.
 
 ## Documentation
 
-See the [CAISO OASIS ingestion guide](docs/caiso-oasis-ingestion.md) for
-scraper usage and data handling details.
+See the docs/ folder for documentation on different infrastructure or model components
 
 ## Markets
 
