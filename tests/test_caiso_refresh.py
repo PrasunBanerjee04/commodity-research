@@ -35,15 +35,22 @@ class RefreshTests(unittest.TestCase):
         self.day = datetime.now(timezone.utc).date() - timedelta(days=10)
         self.requests = []
 
-    def price_payload(self, day, node="TH_SP15_GEN-APND", hours=24):
+    def price_payload(
+        self,
+        day,
+        node="TH_SP15_GEN-APND",
+        hours=24,
+        components=("LMP", "MCE", "MCC", "MCL"),
+    ):
         lower = pipeline._query_bounds(DAM_LMP, day)[0].astimezone(timezone.utc)
         rows = []
         for hour in range(hours):
             start = lower + timedelta(hours=hour)
             finish = start + timedelta(hours=1)
-            rows.append(
-                f"{start.isoformat()},{finish.isoformat()},{day},{hour + 1},{node},42.5,LMP\n"
-            )
+            for component in components:
+                rows.append(
+                    f"{start.isoformat()},{finish.isoformat()},{day},{hour + 1},{node},42.5,{component}\n"
+                )
         return zip_payload({"prices.csv": HEADER + "".join(rows)})
 
     def fetch(self, params, **kwargs):
@@ -160,7 +167,7 @@ class RefreshTests(unittest.TestCase):
         )
         self.assertEqual(
             sum(pl.read_parquet(path).height for path in self.lake.rglob("*.parquet")),
-            24,
+            96,
         )
 
     def test_full_legacy_price_partition_is_adopted_without_request(self):
@@ -173,6 +180,41 @@ class RefreshTests(unittest.TestCase):
         ):
             summary = self.run_pipeline(end_date=self.day + timedelta(days=1))
         self.assertEqual((summary.adopted, summary.failed), (1, 0))
+
+    def test_missing_price_components_prevent_adoption(self):
+        staged = self.client._stage(
+            self.price_payload(self.day, components=("LMP",)), DAM_LMP
+        )
+        normalize_csvs(staged, "dam_lmp", lake_root=self.lake)
+        with patch.object(self.client, "_fetch", side_effect=self.fetch):
+            summary = self.run_pipeline(end_date=self.day + timedelta(days=1))
+        self.assertEqual(
+            (summary.adopted, summary.downloaded, summary.incomplete), (0, 1, 0)
+        )
+
+    def test_price_coverage_and_singlezip_windows_follow_dst(self):
+        for day, hours in ((date(2025, 3, 9), 23), (date(2025, 11, 2), 25)):
+            with self.subTest(day=day):
+                report = replace(DAM_LMP, max_days=1)
+                start, end = pipeline._query_bounds(report, day)
+                with patch.object(
+                    self.client,
+                    "_fetch",
+                    return_value=self.price_payload(day, hours=hours),
+                ) as fetch:
+                    staged = self.client.download(
+                        report, start, end, node="TH_SP15_GEN-APND"
+                    )
+                self.assertEqual(fetch.call_count, 1)
+                normalize_csvs(staged, "dam_lmp", lake_root=self.lake)
+                self.assertTrue(
+                    pipeline._legacy_complete(
+                        pipeline._partition(self.lake, report, day),
+                        report,
+                        day,
+                        "TH_SP15_GEN-APND",
+                    )
+                )
 
     def test_empty_or_wrong_node_legacy_partition_is_not_adopted(self):
         staged = self.client._stage(

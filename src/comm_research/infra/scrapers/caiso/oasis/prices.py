@@ -13,6 +13,7 @@ REPORTS = (
         description="Hourly day-ahead locational marginal prices",
         requires_node=True,
         interval_minutes=60,
+        required_components=("LMP", "MCE", "MCC", "MCL"),
     ),
     Report(
         "PRC_INTVL_LMP",
@@ -24,6 +25,7 @@ REPORTS = (
         description="Five-minute real-time dispatch locational marginal prices",
         requires_node=True,
         interval_minutes=5,
+        required_components=("LMP", "MCE", "MCC", "MCL"),
     ),
     Report(
         "PRC_RTPD_LMP",
@@ -35,6 +37,7 @@ REPORTS = (
         description="Fifteen-minute market locational marginal prices",
         requires_node=True,
         interval_minutes=15,
+        required_components=("LMP", "MCE", "MCC", "MCL"),
     ),
     Report(
         "PRC_HASP_LMP",
@@ -46,6 +49,7 @@ REPORTS = (
         description="Hour-ahead scheduling process prices",
         requires_node=True,
         interval_minutes=15,
+        required_components=("LMP", "MCE", "MCC", "MCL"),
     ),
     Report(
         "PRC_SPTIE_LMP",

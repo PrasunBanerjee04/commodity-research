@@ -148,4 +148,3 @@ Only bounded representative samples have been exercised live, not every report/d
 | `cpm_designations` — CPM Designations | SingleZip: `PUB_CPM_DESIGNATION` (v1) | — | 39 months; snapshot date | portal |
 | `available_import_capability` — Available Import Capability | GroupZip: `AVAIL_IMP_CAP_GRP` (v1) | — | 39 months; snapshot date | portal |
 | `import_capability_ra_plans` — Import Capability Used in RA Plan Data | GroupZip: `ANNUAL_IMP_CAP_USED_RA_PLAN_GRP` (v1) | — | 39 months; snapshot date | portal |
-

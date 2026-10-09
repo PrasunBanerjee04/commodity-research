@@ -32,6 +32,7 @@ class Report:
     date_columns: tuple[str, ...] = ()
     source: str = "gridstatus"
     interval_minutes: int | None = None
+    required_components: tuple[str, ...] = ()
     required_parameters: tuple[str, ...] = ()
     latest_only: bool = False
     same_day_end: bool = False

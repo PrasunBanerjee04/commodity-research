@@ -112,20 +112,21 @@ def query_windows(start: datetime, end: datetime, max_days: int):
         start = stop
 
 
-def trading_day_windows(start: datetime, end: datetime):
-    """Group reports require whole Pacific trading days, including DST days."""
+def trading_day_windows(start: datetime, end: datetime, max_days: int = 1):
+    """Whole Pacific trading days, including DST days; end is exclusive."""
     tz = ZoneInfo("America/Los_Angeles")
     start, end = _utc(start).astimezone(tz), _utc(end).astimezone(tz)
     if (
         start >= end
         or start.time() != datetime.min.time()
         or end.time() != datetime.min.time()
+        or not 1 <= max_days <= 15
     ):
         raise ValueError(
             "GroupZip boundaries must be Pacific midnights with start < end"
         )
     while start < end:
-        stop = start + timedelta(days=1)
+        stop = min(start + timedelta(days=max_days), end)
         yield start.astimezone(timezone.utc), stop.astimezone(timezone.utc)
         start = stop
 
@@ -266,9 +267,16 @@ class CAISOOASISClient:
             raise ValueError("Node filtering is only supported for LMP reports")
         report.request_parameters(parameters, node=node)
         staged: list[Path] = []
+        pacific = ZoneInfo("America/Los_Angeles")
+        aligned = all(
+            _utc(value).astimezone(pacific).time() == datetime.min.time()
+            for value in (start, end)
+        )
         windows = (
-            trading_day_windows(start, end)
-            if report.endpoint == "GroupZip"
+            trading_day_windows(
+                start, end, 1 if report.endpoint == "GroupZip" else report.max_days
+            )
+            if report.endpoint == "GroupZip" or aligned
             else query_windows(start, end, report.max_days)
         )
         for lower, upper in windows:

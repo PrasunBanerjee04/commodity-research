@@ -237,6 +237,14 @@ def _legacy_complete(path: Path, report: Report, day: date, node: str | None) ->
             (pl.col("interval_start_time_gmt") >= lower)
             & (pl.col("interval_start_time_gmt") < upper)
         )
+        components = set(table["lmp_type"]) if "lmp_type" in table.columns else set()
+        if not set(report.required_components) <= components:
+            return False
+        measurements = {"mw", "value", "lmp_prc"} & set(table.columns)
+        if not measurements or any(
+            table[column].null_count() for column in measurements
+        ):
+            return False
         step = timedelta(minutes=report.interval_minutes)
         expected = {
             lower + index * step for index in range(int((upper - lower) / step))

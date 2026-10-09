@@ -61,6 +61,10 @@ python -m venv .venv
 See [OASIS usage and data fields](docs/caiso_oasis.md) for `run()` configuration,
 retention/publication limits, recovery, storage, and the report catalog.
 
+## Documentation
+
+See [docs/](docs/) for infrastructure and model documentation.
+
 ## Markets
 
 ### Power & Gas
