@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import math
 import os
@@ -58,6 +59,7 @@ def _dataset_json(dataset: Dataset) -> dict[str, Any]:
         "venue": dataset.venue,
         "tokens": list(dataset.tokens),
         "files": len(dataset.files),
+        "revision": hashlib.sha256(repr(dataset.files).encode()).hexdigest()[:16],
     }
 
 
@@ -221,11 +223,13 @@ class DashboardHandler(BaseHTTPRequestHandler):
             aggregation,
             payload.get("fallbackToLatest") is True,
         )
+        dimensions = inspect_dataset(dataset).dimensions
         self._json(
             {
                 "observations": bundle.observations,
                 "points": bundle.points,
                 "downsampled": bundle.downsampled,
+                "resolution": bundle.resolution,
                 "fallbackHorizon": [day.isoformat() for day in bundle.fallback_horizon]
                 if bundle.fallback_horizon
                 else None,
@@ -239,6 +243,8 @@ class DashboardHandler(BaseHTTPRequestHandler):
                         "unit": row["unit"],
                         "component": row["component"],
                         "node": row["node"],
+                        "signal": row["signal"],
+                        "dimensions": {column: row[column] for column in dimensions},
                     }
                     for row in bundle.plot.iter_rows(named=True)
                 ],

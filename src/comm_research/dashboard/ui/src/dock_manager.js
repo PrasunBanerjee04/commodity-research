@@ -24,6 +24,7 @@ export class DockManager {
     this.onError = onError;
     this.datasets = [];
     this.openPanels = new Map();
+    this.chartPanels = new Map();
     this.rebuilding = false;
     if (typeof window.dockview?.DockviewComponent !== "function") {
       throw new Error("ERR_DEPENDENCY_LOAD_FAILED: Dockview missing");
@@ -38,10 +39,16 @@ export class DockManager {
           init: ({ params }) => {
             const dataset = { ...params.dataset, key: canonicalDatasetPath(params.dataset.key) };
             chartPanel = new ChartPanel(dataset, element, this.onError, params.settingsKey || id);
+            if (!this.chartPanels.has(dataset.key)) this.chartPanels.set(dataset.key, chartPanel);
             return chartPanel.init();
           },
           layout: () => chartPanel?.resizeChart(),
-          dispose: () => chartPanel?.dispose(),
+          dispose: () => {
+            if (chartPanel) {
+              if (this.chartPanels.get(chartPanel.dataset.key) === chartPanel) this.chartPanels.delete(chartPanel.dataset.key);
+              chartPanel.dispose();
+            }
+          },
         };
       },
     });
@@ -65,8 +72,13 @@ export class DockManager {
     this.updateEmptyState();
   }
 
-  setDatasets(datasets) {
+  setDatasets(datasets, refresh = false) {
     this.datasets = datasets;
+    for (const [key, panel] of this.chartPanels) {
+      const dataset = datasets.find(item => item.key === key);
+      if (dataset && panel.metadata && (refresh || dataset.revision !== panel.dataset.revision)) void panel.reload(dataset);
+      else if (!dataset) panel.showError(new Error("Dataset is no longer available. Rescan the lake."));
+    }
   }
 
   openPanel(dataset, position) {
@@ -145,16 +157,14 @@ export class DockManager {
     if (activeDataset) candidates.sort((a, b) => (a.key === activeDataset.key ? -1 : b.key === activeDataset.key ? 1 : 0));
     const datasets = [...new Map(candidates.map(dataset => [canonicalDatasetPath(dataset.key), dataset])).values()];
     this.rebuilding = true;
-    this.view.clear();
-    this.openPanels.clear();
-    const panels = [];
-    for (let index = 0; index < datasets.length; index += 1) {
-      let position;
-      if (index === 1 && count >= 2) position = { referencePanel: panels[0].id, direction: "right" };
-      else if (index === 2 && count >= 4) position = { referencePanel: panels[0].id, direction: "below" };
-      else if (index === 3 && count >= 4) position = { referencePanel: panels[1].id, direction: "below" };
-      else if (index > 0) position = { referencePanel: panels[0].id, direction: "within" };
-      panels.push(this.openPanel(datasets[index], position));
+    const panels = datasets.map(dataset => this.openPanel(dataset));
+    // Reparent the existing panel/canvas; rebuilding the dock remounted every chart.
+    for (const panel of panels.slice(1)) {
+      panel.api.moveTo({ group: panels[0].api.group, position: "center", skipSetActive: true });
+    }
+    for (let index = 1; index < Math.min(count, panels.length); index++) {
+      const reference = index === 3 ? panels[1] : panels[0];
+      panelPosition(panels[index], reference, index === 1 ? "right" : "bottom");
     }
     if (activeDataset) this.openPanel(activeDataset);
     this.rebuilding = false;
@@ -172,4 +182,9 @@ export class DockManager {
       button.classList.toggle("active", hasPanels && this.view.totalPanels === expectedCount);
     }
   }
+}
+
+function panelPosition(panel, reference, position) {
+  panel.api.moveTo({ group: reference.api.group, position, skipSetActive: true });
+  panel.api.setActive();
 }

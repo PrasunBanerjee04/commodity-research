@@ -1,3 +1,15 @@
+import { clearQueryCaches } from "./query_cache.js";
+
+const lookups = new Map();
+
+function lookup(identity, path) {
+  if (!lookups.has(identity)) {
+    const pending = request(path).catch(error => { lookups.delete(identity); throw error; });
+    lookups.set(identity, pending);
+  }
+  return lookups.get(identity);
+}
+
 export async function request(path, options = {}) {
   const response = await fetch(path, options);
   let payload;
@@ -17,12 +29,12 @@ export function loadCatalog() {
   return request("/api/datasets");
 }
 
-export function loadMetadata(key) {
-  return request(`/api/metadata?key=${encodeURIComponent(key)}`);
+export function loadMetadata(key, revision = "") {
+  return lookup(`metadata:${key}:${revision}`, `/api/metadata?key=${encodeURIComponent(key)}`);
 }
 
-export function loadOptions(key, dimension) {
-  return request(`/api/options?key=${encodeURIComponent(key)}&dimension=${encodeURIComponent(dimension)}`);
+export function loadOptions(key, dimension, revision = "") {
+  return lookup(`options:${key}:${revision}:${dimension}`, `/api/options?key=${encodeURIComponent(key)}&dimension=${encodeURIComponent(dimension)}`);
 }
 
 export function loadSeries(query) {
@@ -33,6 +45,8 @@ export function loadSeries(query) {
   });
 }
 
-export function rescanCatalog() {
-  return request("/api/rescan", { method: "POST" });
+export async function rescanCatalog() {
+  const result = await request("/api/rescan", { method: "POST" });
+  lookups.clear(); clearQueryCaches();
+  return result;
 }

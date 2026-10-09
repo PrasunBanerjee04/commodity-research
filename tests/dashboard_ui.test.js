@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import { DockManager, canonicalDatasetPath } from '../src/comm_research/dashboard/ui/src/dock_manager.js';
 import { traceStyle } from '../src/comm_research/dashboard/ui/src/chart_panel.js';
 import { request } from '../src/comm_research/dashboard/ui/src/api.js';
+import { QueryCache, viewStatistics } from '../src/comm_research/dashboard/ui/src/query_cache.js';
 
 class View {
   constructor() { this.panels = []; this.callbacks = {}; }
@@ -14,7 +15,7 @@ class View {
   get totalPanels() { return this.panels.length; }
   addPanel({ id, params }) {
     const panel = { id, params, focusCount: 0 };
-    panel.api = { setActive: () => { this.activePanel = panel; } };
+    panel.api = { setActive: () => { this.activePanel = panel; }, group: {}, moveTo: ({group}) => { panel.api.group = group; } };
     panel.focus = () => { panel.focusCount++; };
     this.panels.push(panel); this.activePanel = panel; this.callbacks.add(panel); return panel;
   }
@@ -49,8 +50,44 @@ test('old duplicate layouts are repaired during restore', () => {
 });
 test('layout presets preserve all open datasets and do not clone scarce feeds', () => {
   const dock = setup(); dock.setDatasets([dam, rtm]); dock.openPanel(dam); dock.openPanel(rtm);
+  const instances = [...dock.openPanels.values()];
   dock.arrange(4); assert.equal(dock.view.totalPanels, 2); assert.equal(dock.openPanels.size, 2);
   dock.arrange(1); assert.equal(dock.view.totalPanels, 2); assert.equal(dock.openPanels.size, 2);
+  assert.deepEqual(new Set(dock.openPanels.values()), new Set(instances));
+});
+
+function cacheRow(day, node, signal = 'value:LMP', value = 20) {
+  return { timestamp:`2024-01-${String(day).padStart(2,'0')}T00:00:00Z`, value,
+    node, signal, series:`${signal} · ${node}`, dimensions:{node, market_run_id:'RTM'} };
+}
+test('cached date, node and component filters slice locally with inclusive UTC days', () => {
+  const cache = new QueryCache();
+  cache.add({start:'2024-01-01',end:'2024-01-30',signals:['value:LMP','value:CONG'],filters:{node:['NP15','SP15']}}, {
+    plot:[cacheRow(1,'NP15'),cacheRow(2,'NP15'),cacheRow(2,'SP15','value:CONG'),cacheRow(3,'NP15')]
+  });
+  assert.equal(cache.select('2024-01-02','2024-01-02',['value:LMP'],{node:['NP15']}).plot.length,1);
+  assert.equal(cache.select('2024-01-02','2024-01-02',['value:CONG'],{node:['SP15']}).plot.length,1);
+  assert.deepEqual(cache.select('2024-01-01','2024-01-30',['value:LMP'],{node:[]}).plot,[]);
+  assert.equal(cache.select('2024-01-01','2024-01-31',['value:LMP'],{node:['NP15']}),null);
+});
+test('partial cache batches do not claim a missing node/component combination', () => {
+  const cache = new QueryCache();
+  cache.add({start:'2024-01-01',end:'2024-01-30',signals:['value:LMP'],filters:{node:['NP15']}},{plot:[cacheRow(1,'NP15')]});
+  cache.add({start:'2024-01-01',end:'2024-01-30',signals:['value:CONG'],filters:{node:['SP15']}},{plot:[cacheRow(1,'SP15','value:CONG')]});
+  assert.equal(cache.select('2024-01-01','2024-01-30',['value:LMP'],{node:['SP15']}),null);
+});
+test('invalid payloads and point-cap violations cannot poison a cached window', () => {
+  const cache = new QueryCache();
+  const query = {start:'2024-01-01',end:'2024-01-30',signals:['value:LMP'],filters:{node:['NP15']}};
+  assert.throws(()=>cache.add(query,{plot:[{...cacheRow(1,'NP15'),timestamp:'bad'}]}));
+  assert.throws(()=>cache.add(query,{plot:Array.from({length:1501},()=>cacheRow(1,'NP15'))}),/1,500/);
+  assert.equal(cache.windows.length,0);
+});
+test('display statistics use actual timestamps and sample standard deviation', () => {
+  const rows = [cacheRow(1,'NP15','value:LMP',-10),cacheRow(2,'NP15','value:LMP',-5)].map(row=>({...row,_epoch:Date.parse(row.timestamp)/1000}));
+  const [stats]=viewStatistics(rows);
+  assert.equal(stats.change_24h,50); assert.equal(stats.mean,-7.5);
+  assert.equal(stats.std,Math.sqrt(12.5));
 });
 test('node hue is stable across components and congestion is dashed', () => {
   const rows = ['LMP','ENERGY','CONG','LOSS'].map(component => ({ node:'TH_NP15_GEN-APND', component, series: component }));

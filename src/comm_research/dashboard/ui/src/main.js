@@ -34,8 +34,8 @@ function setTheme(theme) {
   document.querySelector("#theme-toggle").textContent = theme === "light" ? "DARK" : "LIGHT";
 }
 
-async function updateCatalog(datasets) {
-  dock.setDatasets(datasets);
+async function updateCatalog(datasets, refresh = false) {
+  dock.setDatasets(datasets, refresh);
   tree.setDatasets(datasets);
   if (!datasets.length) {
     showStatus(new Error("No data lake feeds were discovered."));
@@ -63,15 +63,16 @@ try {
     navigator.classList.toggle("collapsed");
   });
   document.querySelector("#rescan-button").addEventListener("click", async (event) => {
-    event.currentTarget.disabled = true;
+    const button = event.currentTarget;
+    button.disabled = true;
     status.textContent = "RESCANNING DATA LAKE…";
     try {
-      await updateCatalog(await rescanCatalog());
+      await updateCatalog(await rescanCatalog(), true);
       status.textContent = "";
     } catch (error) {
       showStatus(error);
     } finally {
-      event.currentTarget.disabled = false;
+      button.disabled = false;
     }
   });
   await updateCatalog(await loadCatalog());

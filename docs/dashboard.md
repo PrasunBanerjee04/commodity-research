@@ -68,10 +68,11 @@ maximum, period mean, and sample standard deviation (one observation displays
 `(last - reference) / abs(reference) × 100`. A missing or zero reference displays
 `—`; shorter samples are not presented as daily changes.
 
-Large charts keep each bin's first, last, minimum and maximum points, capped at
-4,000 displayed points per trace. Metrics use all selected aggregated intervals
-before display reduction. Queries are capped at 64 traces / two million analytic
-intervals; narrow the horizon or choose a coarser frequency when needed.
+Every API plot is capped at 1,500 points per trace. Native sub-hourly windows
+longer than seven days use hourly means, or four-hour means for windows of 60
+days or more. Any remaining excess keeps each time bin's first, last, minimum,
+and maximum points. API statistics use all selected intervals before display
+reduction. Queries remain capped at 64 traces / two million analytic intervals.
 
 ## Implementation and checks
 
@@ -85,15 +86,19 @@ src/comm_research/dashboard/
   ui/src/dock_manager.js                  # Dockview panels, presets and persistence
   ui/src/tree_navigator.js                # local lake hierarchy and feed opening
   ui/src/chart_panel.js                   # isolated controls, statistics and uPlot
+  ui/src/query_cache.js                   # indexed browser windows and local statistics
+  ui/src/line_renderer.js                 # batched WebGL price lines and Canvas fallback
+  ui/src/canvas_paths.js                  # bounded Canvas strokes without point reduction
   ui/vendor/                              # self-hosted Dockview/uPlot bundles and licenses
   data/loader.py                          # cached discovery and lazy analytics
   config/taxonomy.py                      # hierarchy/field display labels
 ```
 
 Caches use file size and nanosecond modification time in the discovered dataset
-fingerprint and are cleared by **Rescan**. Dated Hive partitions are pruned to the
-selected horizon (with a one-day boundary buffer); Polars then lazily
-projects/filters source columns before collection. Arrow IPC uses memory mapping.
+fingerprint and are cleared by **Rescan**. Opening a feed materializes its
+normalized Parquet/Arrow rows once in RAM; subsequent filters and raw-page
+queries use that snapshot. Node blocks are indexed and sorted by UTC timestamp,
+so date slicing within a node uses binary searches.
 Sources are read only, and symlinked files/directories are excluded. Run the
 server on its default loopback address; the app does not provide authentication
 or remote storage connectors.
@@ -129,7 +134,8 @@ API emits the unified UTC `timestamp` in ISO-8601 form ending in `Z`.
 are migrated. **LMP / Energy / Congestion / Loss** checkboxes and the searchable
 **NODES** dropdown on each ribbon update its series immediately. All unique
 PNodes are searchable; large dropdowns render only 200 matches at a time. Select
-up to eight nodes. A new panel selects the first node to bound the initial query.
+up to eight nodes. A new panel initially displays the first node; its browser
+cache loads the available components and nodes for that date window in batches.
 
 Nodes retain stable hues across components: NP15 blue, SP15 green, ZP26 amber;
 congestion is dashed and losses dotted. Click the legend at the top right to
@@ -161,3 +167,46 @@ Chromium (`python -m playwright install chromium`), then run
 Alternatively set `DASHBOARD_CHROMIUM=/path/to/chromium` to use an installed
 browser. These tests create an isolated lake and HTTP server; they do not change
 the user's lake or download market data.
+
+## Cached interactions
+
+After the initial window loads, date presets, nodes, and components slice
+indexed arrays in JavaScript and update the existing uPlot canvas. Covered
+selections make no API request and display no loading state. ALL history warms
+in the background so wider presets can also switch locally once ready. A cold
+wider date range, cache eviction, or **Rescan** can require a request; those
+operations are outside the warm interaction latency target. **Rescan** refreshes
+open feeds, metadata, and both cache layers after ingestion.
+
+uPlot maintains the axes, scales, and cursor. Price lines use a single batched
+WebGL draw, preserving node hues, component opacity, dashes, and every returned
+point. Native GPU hairlines prioritize fast comparisons; some drivers limit
+their width to one physical pixel. WebGL resources are reused and released when
+a chart closes. If WebGL is unavailable or loses its context, short Canvas
+strokes keep the chart visible; that fallback has no 50ms latency guarantee.
+Split presets move the existing panels rather than recreating canvases.
+
+The narrowest cached window containing the selected dates supplies the view.
+For example, 1D/5D sliced from a cached 30-day RTM window retains its hourly
+means; it does not reconstruct native five-minute ticks from sampled data.
+The chart badge identifies the resolution and statistics basis. **Source stats**
+use exact source intervals when the entire cached window is selected;
+**Display stats** use the displayed cached samples when slicing a smaller window.
+The strip's tooltip explains this distinction.
+
+The server retains up to eight feed snapshots within 512 MiB of source data and
+rejects individual feeds over that limit or five million rows. Browser caches
+retain four reusable feed identities, up to eight windows and 250,000 points per
+feed; open panels pin their own feed cache until closed.
+Oversize feeds require narrower dataset directories. Snapshots live only in
+process/browser memory; source rows are not written to browser storage.
+Only controls and layout are persisted, with deferred writes flushed on reload.
+
+The Chromium suite includes a 90-day, three-node RTM fixture with 311,040 source
+rows and twelve concurrent traces. It measures warm 1D/5D/1M/ALL, component, and
+node changes through forced raster completion and the following painted frame,
+enforcing a maximum of 50ms for both across forty-eight interactions, including
+clearing and restoring all components. It checks canvas
+identity and rejects API requests or loading states during those interactions.
+These measurements apply to the tested Chromium/WebGL environment; cold loading,
+hardware, browser scheduling, and much larger trace selections affect latency.

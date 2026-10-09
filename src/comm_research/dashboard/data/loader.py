@@ -1,12 +1,14 @@
-"""Fingerprint-cached, lazy Parquet/Arrow discovery and desk analytics."""
+"""Fingerprint-cached RAM snapshots, indexed views and bounded desk analytics."""
 
 from __future__ import annotations
 
 import os
+from collections import OrderedDict
 from dataclasses import dataclass, replace
 from datetime import date, datetime, time, timedelta, timezone
 from functools import lru_cache
 from pathlib import Path
+from threading import Lock, RLock
 from zoneinfo import ZoneInfo
 
 import polars as pl
@@ -27,9 +29,11 @@ from comm_research.infra.tools.caiso_schema import (
 )
 
 FORMATS = {".parquet", ".arrow", ".ipc", ".feather"}
-MAX_POINTS_PER_TRACE = 4_000
+MAX_POINTS_PER_TRACE = 1_500
 MAX_ANALYTIC_ROWS = 2_000_000
 MAX_TRACES = 64
+MAX_SESSION_ROWS = 5_000_000
+MEMORY_CACHE_BYTES = 512 * 1024 * 1024
 FilterSet = tuple[tuple[str, tuple[str, ...]], ...]
 
 
@@ -96,6 +100,19 @@ class SeriesBundle:
     points: int
     downsampled: bool
     fallback_horizon: tuple[date, date] | None = None
+    resolution: str = "native"
+
+
+@dataclass
+class CachedFeed:
+    frame: pl.DataFrame
+    node_ranges: dict[str, tuple[int, int]]
+    bytes: int
+
+
+_feeds: OrderedDict[Dataset, CachedFeed] = OrderedDict()
+_feed_lock = RLock()
+_cold_load_lock = Lock()
 
 
 @lru_cache(maxsize=8)
@@ -203,6 +220,114 @@ def _timestamp(frame: pl.LazyFrame, column: str) -> pl.Expr:
     return utc_expression(frame, column)
 
 
+def _time_column(schema: pl.Schema) -> str | None:
+    return next((column for column in TIME_COLUMNS if column in schema), None) or next(
+        (
+            column
+            for column, dtype in schema.items()
+            if isinstance(dtype, pl.Datetime) or dtype == pl.Date
+        ),
+        None,
+    )
+
+
+def cached_feed(dataset: Dataset) -> CachedFeed:
+    """Materialize once per fingerprint; indexed node blocks and time slices stay in RAM.
+
+    Cold loads are serialized without blocking warm snapshot lookups.
+    Rescan clears snapshots; LRU eviction bounds retained source memory to 512 MiB.
+    """
+    with _feed_lock:
+        if dataset in _feeds:
+            _feeds.move_to_end(dataset)
+            return _feeds[dataset]
+    with _cold_load_lock:
+        with _feed_lock:
+            if dataset in _feeds:
+                _feeds.move_to_end(dataset)
+                return _feeds[dataset]
+        source = _scan(dataset)
+        schema = source.collect_schema()
+        if any(column.startswith("__desk_") for column in schema):
+            raise LakeError("Source columns use reserved dashboard field names.")
+        column = _time_column(schema)
+        if column:
+            source = source.with_columns(
+                _timestamp(source, column).alias("__desk_time")
+            )
+        frame = source.limit(MAX_SESSION_ROWS + 1).collect(engine="streaming")
+        if frame.height > MAX_SESSION_ROWS:
+            raise LakeError(
+                "Feed exceeds five million cached rows; split it into narrower datasets."
+            )
+        size = frame.estimated_size()
+        if size > MEMORY_CACHE_BYTES:
+            raise LakeError(
+                "Feed exceeds the 512 MiB memory cache; split it into narrower datasets."
+            )
+        sort_columns = [c for c in ("node", "__desk_time") if c in frame.columns]
+        if sort_columns:
+            frame = frame.sort(sort_columns, nulls_last=True)
+        ranges = {}
+        if "node" in frame.columns:
+            offset = 0
+            for node, length in (
+                frame.group_by("node", maintain_order=True).len().iter_rows()
+            ):
+                ranges[node] = (offset, length)
+                offset += length
+        snapshot = CachedFeed(frame, ranges, size)
+        with _feed_lock:
+            while _feeds and (
+                len(_feeds) >= 8
+                or sum(item.bytes for item in _feeds.values()) + size
+                > MEMORY_CACHE_BYTES
+            ):
+                _feeds.popitem(last=False)
+            _feeds[dataset] = snapshot
+            return snapshot
+
+
+def _memory_slice(
+    dataset: Dataset,
+    start: date | None,
+    end: date | None,
+    zone: str,
+    filters: FilterSet,
+) -> pl.LazyFrame:
+    snapshot = cached_feed(dataset)
+    selected_nodes = dict(filters).get("node")
+    blocks = [snapshot.frame]
+    if selected_nodes is not None and snapshot.node_ranges:
+        blocks = [
+            snapshot.frame.slice(*snapshot.node_ranges[node])
+            for node in selected_nodes
+            if node in snapshot.node_ranges
+        ]
+    bounds = (
+        _utc_bounds(start, end, zone) if start is not None and end is not None else None
+    )
+    # Each node block is sorted, so a date change needs two binary searches, not a scan.
+    if (
+        bounds
+        and "__desk_time" in snapshot.frame.columns
+        and (selected_nodes is not None or not snapshot.node_ranges)
+    ):
+        sliced = []
+        for block in blocks:
+            times = block["__desk_time"]
+            lower = times.search_sorted(bounds[0], side="left")
+            upper = times.search_sorted(bounds[1], side="left")
+            sliced.append(block.slice(lower, upper - lower))
+        blocks = sliced
+    frame = (pl.concat(blocks) if blocks else snapshot.frame.head(0)).lazy()
+    if bounds and "__desk_time" in snapshot.frame.columns:
+        frame = frame.filter(
+            (pl.col("__desk_time") >= bounds[0]) & (pl.col("__desk_time") < bounds[1])
+        )
+    return frame
+
+
 def _utc_bounds(start: date, end: date, zone: str) -> tuple[datetime, datetime]:
     if start > end:
         raise LakeError("Start date must be on or before end date.")
@@ -222,7 +347,7 @@ def _filtered(
     filters: FilterSet,
     prune_partitions: bool = True,
 ) -> pl.LazyFrame:
-    frame = _scan(dataset, start, end) if prune_partitions else _scan(dataset)
+    frame = _memory_slice(dataset, start, end, zone, filters)
     schema = frame.collect_schema()
     missing = [column for column, _ in metadata.schema if column not in schema]
     if missing:
@@ -232,9 +357,6 @@ def _filtered(
             raise LakeError(f"Unsupported dimension: {column}")
         frame = frame.filter(pl.col(column).cast(pl.String).is_in(values))
     if metadata.time_column:
-        frame = frame.with_columns(
-            _timestamp(frame, metadata.time_column).alias("__desk_time")
-        )
         if start is not None and end is not None:
             lower, upper = _utc_bounds(start, end, zone)
             frame = frame.filter(
@@ -244,30 +366,19 @@ def _filtered(
         raise LakeError(
             "This table has no recognized time field; inspect its raw rows."
         )
-    if any(column.startswith("__desk_") for column in schema):
-        raise LakeError("Source columns use reserved dashboard field names.")
     return frame
 
 
 @lru_cache(maxsize=64)
 def inspect_dataset(dataset: Dataset) -> Metadata:
-    frame = _scan(dataset)
-    schema = frame.collect_schema()
-    time_column = next((column for column in TIME_COLUMNS if column in schema), None)
-    if time_column is None:
-        time_column = next(
-            (
-                column
-                for column, dtype in schema.items()
-                if isinstance(dtype, pl.Datetime) or dtype == pl.Date
-            ),
-            None,
-        )
+    frame = cached_feed(dataset).frame.lazy()
+    schema = frame.drop("__desk_time", strict=False).collect_schema()
+    time_column = _time_column(schema)
     earliest = latest = None
     if time_column:
         bounds = frame.select(
-            _timestamp(frame, time_column).min().alias("min"),
-            _timestamp(frame, time_column).max().alias("max"),
+            pl.col("__desk_time").min().alias("min"),
+            pl.col("__desk_time").max().alias("max"),
         ).collect(engine="streaming")
         earliest, latest = bounds.row(0)
     numeric = [
@@ -364,8 +475,10 @@ def inspect_dataset(dataset: Dataset) -> Metadata:
 def dimension_options(dataset: Dataset, column: str) -> tuple[str, ...]:
     if column not in inspect_dataset(dataset).dimensions:
         raise LakeError("Unsupported dimension.")
-    query = _scan(dataset).select(
-        pl.col(column).cast(pl.String).drop_nulls().unique().sort()
+    query = (
+        cached_feed(dataset)
+        .frame.lazy()
+        .select(pl.col(column).cast(pl.String).drop_nulls().unique().sort())
     )
     if column != "node":
         query = query.limit(5_000)
@@ -391,11 +504,13 @@ def _signal_rows(
     expression = pl.lit(None, dtype=pl.String)
     unit = pl.lit(None, dtype=pl.String)
     component = pl.lit(None, dtype=pl.String)
+    signal_key = pl.lit(None, dtype=pl.String)
     for signal in signals:
         condition = pl.col("__desk_metric") == signal.column
         if signal.selector_column:
             condition &= pl.col(signal.selector_column) == signal.selector_value
         expression = pl.when(condition).then(pl.lit(signal.label)).otherwise(expression)
+        signal_key = pl.when(condition).then(pl.lit(signal.key)).otherwise(signal_key)
         unit = pl.when(condition).then(pl.lit(signal.unit)).otherwise(unit)
         component = (
             pl.when(condition).then(pl.lit(signal.component)).otherwise(component)
@@ -407,6 +522,7 @@ def _signal_rows(
             pl.concat_str(labels, separator=" · ").alias("series"),
             unit.alias("unit"),
             component.alias("component"),
+            signal_key.alias("signal"),
             (
                 pl.col("node")
                 if "node" in metadata.dimensions
@@ -422,6 +538,8 @@ def _signal_rows(
             "unit",
             "component",
             "node",
+            "signal",
+            *[column for column in metadata.dimensions if column != "node"],
         )
         .unique(subset=["timestamp", "series", "value", "unit"], maintain_order=True)
     )
@@ -551,7 +669,14 @@ def load_series(
     value = pl.col("value").mean() if aggregation == "Mean" else pl.col("value").last()
     series = (
         rows.group_by(
-            "timestamp", "series", "unit", "component", "node", maintain_order=True
+            "timestamp",
+            "series",
+            "unit",
+            "component",
+            "node",
+            "signal",
+            *[column for column in metadata.dimensions if column != "node"],
+            maintain_order=True,
         )
         .agg(value.alias("value"), pl.len().alias("observations"))
         .limit(MAX_ANALYTIC_ROWS + 1)
@@ -593,13 +718,37 @@ def load_series(
     if series["series"].n_unique() > MAX_TRACES:
         raise LakeError("More than 64 traces selected. Narrow the series filters.")
     stats = summarize(series)
-    plot = reduce_plot_points(series)
+    resolution = frequency
+    display = series
+    window_days = (end - start).days + 1
+    if frequency == "native" and window_days > 7:
+        trace = series.filter(pl.col("series") == series["series"][0])
+        interval = trace["timestamp"].diff().dt.total_seconds().drop_nulls().median()
+        if interval is not None and 0 < interval < 3600:
+            resolution = "1h" if window_days < 60 else "4h"
+            display = (
+                series.with_columns(pl.col("timestamp").dt.truncate(resolution))
+                .group_by(
+                    "timestamp",
+                    "series",
+                    "unit",
+                    "component",
+                    "node",
+                    "signal",
+                    *[column for column in metadata.dimensions if column != "node"],
+                    maintain_order=True,
+                )
+                .agg(pl.col("value").mean())
+                .sort("timestamp")
+            )
+    plot = reduce_plot_points(display)
     return SeriesBundle(
         plot,
         stats,
         series["observations"].sum(),
         series.height,
         plot.height < series.height,
+        resolution=resolution,
     )
 
 
@@ -638,6 +787,8 @@ def load_raw_page(
 
 
 def clear_caches() -> None:
+    with _cold_load_lock, _feed_lock:
+        _feeds.clear()
     for function in (
         discover_lake,
         inspect_dataset,

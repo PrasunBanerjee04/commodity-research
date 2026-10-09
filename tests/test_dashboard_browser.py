@@ -141,6 +141,104 @@ class DashboardBrowserTests(unittest.TestCase):
             ["2023-07-08", "2023-07-08"],
         )
 
+    def test_webgl_unavailable_uses_visible_canvas_fallback(self):
+        self.page.add_init_script("""const original = HTMLCanvasElement.prototype.getContext;
+          HTMLCanvasElement.prototype.getContext = function(type, ...options) {
+            return type === 'webgl' ? null : original.call(this, type, ...options);
+          };""")
+        self.open()
+        self.assert_canvases(2)
+        self.assertEqual(self.page.locator('.uplot[data-renderer="canvas"]').count(), 2)
+        panel = self.page.locator(".market-panel").first
+        panel.get_by_role("checkbox", name="Congestion", exact=True).check()
+        self.assert_canvases(2)
+        self.assertEqual(panel.locator(".chart-legend button").count(), 2)
+
+    def test_lost_webgl_context_keeps_price_charts_visible(self):
+        self.page.add_init_script("""window.priceContexts = [];
+          const original = HTMLCanvasElement.prototype.getContext;
+          HTMLCanvasElement.prototype.getContext = function(type, ...options) {
+            const context = original.call(this, type, ...options);
+            if (type === 'webgl' && context) window.priceContexts.push(context);
+            return context;
+          };""")
+        self.open()
+        self.assert_canvases(2)
+        self.page.evaluate("""() => {
+          for (const context of window.priceContexts)
+            context.getExtension('WEBGL_lose_context').loseContext();
+        }""")
+        for panel in self.page.locator(".market-panel").all():
+            panel.get_by_role("checkbox", name="Congestion", exact=True).check()
+        self.assert_canvases(2)
+        self.assertEqual(self.page.locator('.uplot[data-renderer="canvas"]').count(), 2)
+
+    def test_series_with_different_sampled_timestamps_still_draw_lines(self):
+        path = (
+            Path(self.temporary.name)
+            / "power_gas/napg/caiso/rtm_lmp/year=2023/month=07/day=08/data.parquet"
+        )
+        original = path.read_bytes()
+        try:
+            start = datetime(2023, 7, 8, 7, tzinfo=timezone.utc)
+            pl.DataFrame(
+                {
+                    "timestamp": [
+                        start + timedelta(minutes=5 * index) for index in range(6)
+                    ],
+                    "node": "TH_NP15_GEN-APND",
+                    "lmp_type": ["LMP", "MCC"] * 3,
+                    "value": [40.0, 20.0, 45.0, 25.0, 50.0, 30.0],
+                }
+            ).write_parquet(path)
+            clear_caches()
+            self.open()
+            panel = self.page.locator(".market-panel").filter(has_text="Real-Time LMP")
+            panel.get_by_role("checkbox", name="Congestion", exact=True).check()
+            self.assert_canvases(2)
+            self.assertEqual(panel.locator(".chart-legend button").count(), 2)
+            pl.read_parquet(path).head(1).write_parquet(path)
+            clear_caches()
+            self.page.reload(wait_until="networkidle")
+            self.assert_canvases(2)
+        finally:
+            path.write_bytes(original)
+            clear_caches()
+
+    def test_rescan_invalidates_open_feed_and_refreshes_bounds(self):
+        path = (
+            Path(self.temporary.name)
+            / "power_gas/napg/caiso/rtm_lmp/year=2023/month=07/day=08/data.parquet"
+        )
+        original = path.read_bytes()
+        try:
+            self.open()
+            self.assert_canvases(2)
+            panel = self.page.locator(".market-panel").filter(has_text="Real-Time LMP")
+            panel.locator('[data-range="ALL"]').click()
+            new = pl.read_parquet(path).with_columns(
+                pl.col("interval_start_time_gmt") + timedelta(days=2)
+            )
+            new.write_parquet(path)
+            self.page.get_by_role("button", name="RESCAN", exact=True).click()
+            self.page.wait_for_function("""() => [...document.querySelectorAll('.market-panel')]
+              .find(p => p.querySelector('.panel-title').textContent.includes('Real-Time'))
+              .querySelector('[data-date="end"]').value === '2023-07-10'""")
+            self.page.wait_for_function("""() => [...document.querySelectorAll('.market-panel')]
+              .find(p => p.querySelector('.panel-title').textContent.includes('Real-Time'))
+              .querySelector('.chart-empty').hidden""")
+            self.assert_canvases(2)
+            self.assertTrue(
+                self.page.get_by_role("button", name="RESCAN", exact=True).is_enabled()
+            )
+            self.assertEqual(
+                panel.locator('[data-date="start"]').input_value(), "2023-07-10"
+            )
+            self.assertEqual(panel.locator(".panel-error").inner_text(), "")
+        finally:
+            path.write_bytes(original)
+            clear_caches()
+
     def test_splits_window_resize_navigator_and_hidden_tab_activation(self):
         self.open()
         self.assert_canvases(2)
@@ -346,6 +444,122 @@ class DashboardBrowserTests(unittest.TestCase):
         )
         self.page.locator("#dockview").evaluate("element => element.style.display = ''")
         self.assert_canvases(2)
+
+    def test_warm_filters_render_under_50ms_without_fetches_or_spinners(self):
+        path = (
+            Path(self.temporary.name)
+            / "power_gas/napg/caiso/rtm_lmp/year=2023/month=07/day=08/data.parquet"
+        )
+        original = path.read_bytes()
+        start = datetime(2023, 7, 1, tzinfo=timezone.utc)
+        ticks = pl.datetime_range(
+            start, start + timedelta(days=90), interval="5m", closed="left", eager=True
+        )
+        frame = (
+            pl.DataFrame({"timestamp": ticks})
+            .join(
+                pl.DataFrame(
+                    {
+                        "node": [
+                            "TH_NP15_GEN-APND",
+                            "TH_SP15_GEN-APND",
+                            "TH_ZP26_GEN-APND",
+                        ]
+                    }
+                ),
+                how="cross",
+            )
+            .join(pl.DataFrame({"lmp_type": ["LMP", "MCE", "MCC", "MCL"]}), how="cross")
+            .with_columns(
+                (30 + (pl.col("timestamp").dt.epoch("s") / 3600).sin() * 20).alias(
+                    "value"
+                )
+            )
+        )
+        frame.write_parquet(path)
+        clear_caches()
+        try:
+            self.open()
+            self.assert_canvases(2)
+            requests = []
+            self.page.on("request", lambda request: requests.append(request.url))
+            report = self.page.evaluate("""async () => {
+              const panel = [...document.querySelectorAll('.market-panel')]
+                .find(panel => panel.querySelector('.panel-title').textContent.includes('Real-Time'));
+              // Stress twelve concurrent traces, including dashed congestion
+              // and dotted losses, without changing the adversarial source data.
+              for (const choice of panel.querySelectorAll('.component-ribbon [aria-checked="false"], .node-picker [aria-checked="false"]')) {
+                await new Promise(resolve => {
+                  panel.addEventListener('chart-view-updated', resolve, { once:true }); choice.click();
+                });
+              }
+              const originalCanvas = panel.querySelector('canvas');
+              const initialTraces = panel.querySelectorAll('.chart-legend button').length;
+              const samples = [], spinners = [];
+              const observer = new MutationObserver(records => {
+                for (const record of records) for (const node of record.addedNodes)
+                  if (node.textContent.includes('LOADING')) spinners.push(node.textContent);
+              });
+              observer.observe(panel.querySelector('.chart-empty'), { childList:true, subtree:true });
+              // Real input handlers run as tasks, not inside the previous RAF callback.
+              const measure = async element => {
+                await new Promise(resolve => setTimeout(resolve, 0));
+                return new Promise(resolve => {
+                const start = performance.now();
+                panel.addEventListener('chart-view-updated', () => {
+                  // Force raster completion: a draw hook alone only submits commands.
+                  panel.querySelector('canvas').getContext('2d').getImageData(0, 0, 1, 1);
+                  const updateMs = performance.now() - start;
+                  requestAnimationFrame(() => {
+                    const firstFrameMs = performance.now() - start;
+                    requestAnimationFrame(() => {
+                      samples.push({ updateMs, firstFrameMs, paintMs:performance.now() - start }); resolve();
+                    });
+                  });
+                }, { once:true });
+                element.click();
+                });
+              };
+              for (let repeat = 0; repeat < 5; repeat++) {
+                for (const range of ['1D','5D','1M','ALL'])
+                  await measure(panel.querySelector(`[data-range="${range}"]`));
+                for (const selector of ['[data-signal-key$=":CONG"]','[data-node=""][value="TH_SP15_GEN-APND"]']) {
+                  await measure(panel.querySelector(selector));
+                  await measure(panel.querySelector(selector));
+                }
+              }
+              // Clearing all components and restoring them must also retain
+              // the GPU context instead of compiling a fresh chart on a click.
+              const components = [...panel.querySelectorAll('.component-ribbon [data-signal-key]')];
+              for (const component of components) await measure(component);
+              for (const component of components) await measure(component);
+              observer.disconnect();
+              const percentile = (key, fraction) => {
+                const values = samples.map(row => row[key]).sort((a,b)=>a-b);
+                return values[Math.ceil(values.length*fraction)-1];
+              };
+              return { samples:samples.length, initialTraces, renderer:panel.querySelector('.uplot').dataset.renderer,
+                updateP95:percentile('updateMs',.95),
+                updateMax:percentile('updateMs',1), paintP95:percentile('paintMs',.95),
+                firstFrameP95:percentile('firstFrameMs',.95),
+                paintMax:percentile('paintMs',1), sameCanvas:panel.querySelector('canvas')===originalCanvas,
+                spinners, error:panel.querySelector('.panel-error').textContent };
+            }""")
+            print("\nWarm RTM interaction benchmark:", json.dumps(report), flush=True)
+            self.assertEqual(report["samples"], 48)
+            self.assertEqual(report["initialTraces"], 12)
+            self.assertEqual(report["renderer"], "webgl")
+            self.assertLess(report["updateMax"], 50)
+            self.assertLess(report["paintP95"], 50)
+            self.assertLess(report["paintMax"], 50)
+            self.assertTrue(report["sameCanvas"])
+            self.assertEqual(report["spinners"], [])
+            self.assertEqual(report["error"], "")
+            self.assertFalse(any("/api/" in url for url in requests), requests)
+            self.assertEqual(self.page_errors, [])
+        finally:
+            path.write_bytes(original)
+            clear_caches()
 
 
 if __name__ == "__main__":

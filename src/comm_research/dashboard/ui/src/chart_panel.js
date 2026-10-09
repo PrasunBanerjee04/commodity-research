@@ -1,4 +1,7 @@
 import { loadMetadata, loadOptions, loadSeries } from "./api.js";
+import { feedCache } from "./query_cache.js";
+import { emptyPaths } from "./canvas_paths.js";
+import { LineRenderer } from "./line_renderer.js";
 
 const NODE_COLORS = ["#2962FF", "#089981", "#D18B35", "#8191A8", "#F23645"];
 const COMPONENT_ALIASES = { MCE: "ENERGY", MCC: "CONG", MCL: "LOSS", MGHG: "GHG" };
@@ -57,6 +60,18 @@ function titleFor(dataset) {
   return text.includes(" / ") ? text.replace(" / ", ": ") : text;
 }
 
+function choiceButton(value, label, selected) {
+  const button = document.createElement("button");
+  button.type = "button"; button.className = "choice-toggle"; button.value = value;
+  button.setAttribute("role", "checkbox"); button.setAttribute("aria-label", label);
+  button.setAttribute("aria-checked", String(selected));
+  const marker = document.createElement("span"); marker.className = "choice-marker";
+  marker.setAttribute("aria-hidden", "true");
+  const text = document.createElement("span"); text.textContent = label;
+  button.append(marker, text);
+  return button;
+}
+
 function savedSettings(key) {
   try {
     const settings = JSON.parse(localStorage.getItem("commodity-panel-settings") || "{}");
@@ -95,7 +110,10 @@ export class ChartPanel {
     this.signals = [];
     this.lastRows = [];
     this.requestSequence = 0;
-    this.themeListener = () => { if (this.lastRows.length) this.renderChart(this.lastRows); };
+    this.nodeValues = [];
+    this.saveTimer = null;
+    this.pageHideListener = () => saveSettings(this.settingsKey, this.settings);
+    this.themeListener = () => { this.destroyChart(); if (this.lastRows.length) this.renderChart(this.lastRows); };
   }
 
   async init() {
@@ -120,6 +138,7 @@ export class ChartPanel {
       <section class="panel-chart chart-viewport" aria-label="Chart viewport">
         <div class="chart-mount"></div>
         <div class="chart-legend" role="group" aria-label="Chart legend"></div>
+        <div class="chart-resolution"></div>
         <div class="chart-empty" role="status">LOADING_DATA…</div>
       </section>
       <div class="panel-error" role="status"></div>
@@ -134,6 +153,7 @@ export class ChartPanel {
     this.signalOptions = this.container.querySelector("[data-signal-options]");
     this.componentRibbon = this.container.querySelector(".component-ribbon");
     this.legend = this.container.querySelector(".chart-legend");
+    this.resolutionLabel = this.container.querySelector(".chart-resolution");
     this.dimensionControls = this.container.querySelector(".dimension-controls");
     this.container.addEventListener("toggle", () => this.positionPickers(), true);
     this.container.querySelector(".panel-toolbar").addEventListener("scroll", () => this.positionPickers());
@@ -141,36 +161,49 @@ export class ChartPanel {
     this.resizeObserver = new ResizeObserver(() => this.resizeChart());
     this.resizeObserver.observe(this.mount);
     document.addEventListener("commodities-theme-change", this.themeListener);
+    window.addEventListener("pagehide", this.pageHideListener);
 
     this.container.querySelector(".panel-update").addEventListener("click", () => this.refresh());
     this.container.querySelectorAll("[data-range]").forEach((button) => {
       button.addEventListener("click", () => this.applyRange(button.dataset.range));
     });
-    this.startInput.addEventListener("change", () => this.setRangeActive(null));
-    this.endInput.addEventListener("change", () => this.setRangeActive(null));
+    const dateChange = () => {
+      this.setRangeActive(null);
+      if (this.startInput.value && this.endInput.value && this.startInput.value <= this.endInput.value) this.persistAndRefresh();
+    };
+    this.startInput.addEventListener("change", dateChange);
+    this.endInput.addEventListener("change", dateChange);
     const signalChange = (event) => {
-      const checked = this.container.querySelectorAll('[data-signal-key]:checked');
+      const button = event.target.closest("[data-signal-key]");
+      if (!button) return;
+      const selected = button.getAttribute("aria-checked") !== "true";
+      button.setAttribute("aria-checked", String(selected));
+      const checked = this.container.querySelectorAll('[data-signal-key][aria-checked="true"]');
       if (checked.length > 8) {
-        event.target.checked = false;
+        button.setAttribute("aria-checked", "false");
         this.showError(new Error("Select no more than eight signals."));
         return;
       }
       this.persistAndRefresh();
     };
-    this.signalOptions.addEventListener("change", signalChange);
-    this.componentRibbon.addEventListener("change", signalChange);
-    this.dimensionControls.addEventListener("change", (event) => {
-      const node = event.target.closest("input[data-node]");
+    this.signalOptions.addEventListener("click", signalChange);
+    this.componentRibbon.addEventListener("click", signalChange);
+    this.dimensionControls.addEventListener("click", (event) => {
+      const node = event.target.closest("[data-node]");
       if (node) {
         const chosen = new Set(this.filters.node || []);
-        if (node.checked) chosen.add(node.value); else chosen.delete(node.value);
+        const selectedNode = node.getAttribute("aria-checked") !== "true";
+        if (selectedNode) chosen.add(node.value); else chosen.delete(node.value);
         const selected = [...chosen];
-        if (selected.length > 8) { node.checked = false; this.showError(new Error("Select up to eight nodes.")); return; }
+        if (selected.length > 8) { this.showError(new Error("Select up to eight nodes.")); return; }
+        node.setAttribute("aria-checked", String(selectedNode));
         this.filters.node = selected;
         this.updateNodeLabel();
         this.persistAndRefresh();
         return;
       }
+    });
+    this.dimensionControls.addEventListener("change", (event) => {
       const select = event.target.closest("select[data-dimension]");
       if (!select) return;
       const { dimension } = select.dataset;
@@ -184,13 +217,18 @@ export class ChartPanel {
         this.showError(new Error("ERR_DEPENDENCY_LOAD_FAILED: uPlot missing"));
         return;
       }
-      this.metadata = await loadMetadata(this.dataset.key);
+      this.metadata = await loadMetadata(this.dataset.key, this.dataset.revision);
       if (this.disposed) return;
+      this.dataset.revision = this.metadata.dataset.revision;
+      this.cache = feedCache(this.dataset.key, this.dataset.revision);
       this.configureDates();
       this.configureSignals();
       await this.configureDimensions();
       if (this.disposed) return;
+      if (this.startInput.value && this.endInput.value) await this.ensureWindow(this.startInput.value, this.endInput.value);
+      if (this.disposed) return;
       await this.refresh();
+      this.prefetchHistory();
     } catch (error) {
       if (!this.disposed) this.showError(error);
     }
@@ -214,7 +252,7 @@ export class ChartPanel {
     this.startInput.value = validSavedRange ? this.settings.start : earliest;
     const initialRange = this.settings.range === undefined || !validSavedRange ? "1M" : this.settings.range;
     this.setRangeActive(initialRange);
-    if (initialRange && initialRange !== "ALL") this.applyRange(initialRange, false);
+    if (initialRange) this.applyRange(initialRange, false);
   }
 
   configureSignals() {
@@ -232,18 +270,10 @@ export class ChartPanel {
     this.signalOptions.replaceChildren();
     this.componentRibbon.replaceChildren();
     for (const signal of this.signals) {
-      const label = document.createElement("label");
-      const checkbox = document.createElement("input");
-      checkbox.type = "checkbox";
-      checkbox.value = signal.key;
+      const checkbox = choiceButton(signal.key, signal.label, this.settings.signals.includes(signal.key));
       checkbox.dataset.signalKey = signal.key;
-      checkbox.checked = this.settings.signals.includes(signal.key);
-      checkbox.setAttribute("aria-label", signal.label);
-      const text = document.createElement("span");
-      text.textContent = signal.label;
-      label.append(checkbox, text);
-      if (["LMP", "ENERGY", "CONG", "LOSS"].includes(signal.component)) this.componentRibbon.append(label);
-      else this.signalOptions.append(label);
+      if (["LMP", "ENERGY", "CONG", "LOSS"].includes(signal.component)) this.componentRibbon.append(checkbox);
+      else this.signalOptions.append(checkbox);
     }
     this.updateSignalLabel();
   }
@@ -253,8 +283,10 @@ export class ChartPanel {
     const preferred = dimensions.filter((dimension) => /node|pnode/i.test(dimension));
     const ordered = [...preferred, ...dimensions.filter((dimension) => !preferred.includes(dimension))];
     const fragments = [];
-    for (const dimension of ordered) {
-      const result = await loadOptions(this.dataset.key, dimension);
+    const results = await Promise.all(ordered.map(dimension => loadOptions(this.dataset.key, dimension, this.dataset.revision)));
+    for (let index = 0; index < ordered.length; index++) {
+      const dimension = ordered[index];
+      const result = results[index];
       if (this.disposed) return;
       if (dimension === "node") {
         const picker = document.createElement("details");
@@ -265,6 +297,7 @@ export class ChartPanel {
         const options = document.createElement("div");
         options.className = "signal-options";
         const values = result.values || [];
+        this.nodeValues = values;
         const requested = this.settings.filters?.node;
         // A bounded initial selection keeps an all-node feed below the trace limit.
         const selected = requested === undefined ? values.slice(0, 1) : requested;
@@ -276,13 +309,9 @@ export class ChartPanel {
           list.replaceChildren();
           const matches = values.filter(value => value.toLowerCase().includes(search.value.toLowerCase()));
           for (const value of matches.slice(0, 200)) {
-            const label = document.createElement("label");
-            const input = document.createElement("input");
-            input.type = "checkbox"; input.value = value; input.dataset.node = "";
-            input.checked = this.filters.node.includes(value);
-            input.setAttribute("aria-label", value);
-            const text = document.createElement("span"); text.textContent = value;
-            label.append(input, text); list.append(label);
+            const input = choiceButton(value, value, this.filters.node.includes(value));
+            input.dataset.node = "";
+            list.append(input);
           }
           if (matches.length > 200) {
             const note = document.createElement("small"); note.textContent = `${matches.length} matches; refine search`; list.append(note);
@@ -334,7 +363,7 @@ export class ChartPanel {
   }
 
   selectedSignals() {
-    return [...this.container.querySelectorAll('[data-signal-key]:checked')]
+    return [...this.container.querySelectorAll('[data-signal-key][aria-checked="true"]')]
       .slice(0, 8)
       .map((checkbox) => checkbox.value);
   }
@@ -374,7 +403,7 @@ export class ChartPanel {
       else delete this.filters[dimension];
     }
     this.settings.filters = this.filters;
-    saveSettings(this.settingsKey, this.settings);
+    this.scheduleSave();
     this.updateSignalLabel();
     await this.refresh();
   }
@@ -390,26 +419,34 @@ export class ChartPanel {
       this.showError(new Error("Select a valid date range."));
       return;
     }
-    this.showState("LOADING_DATA…");
     try {
-      const result = await loadSeries({
-        key: this.dataset.key,
-        start: this.startInput.value,
-        end: this.endInput.value,
-        zone: "UTC",
-        signals,
-        filters: this.filters,
-        frequency: "native",
-        aggregation: "Mean",
-        fallbackToLatest: this.settings.range === "1M",
-      });
+      let result = this.cache.select(this.startInput.value, this.endInput.value, signals, this.filters);
+      if (!result) {
+        this.showState("LOADING_DATA…");
+        await this.ensureWindow(this.startInput.value, this.endInput.value);
+        if (this.disposed || requestSequence !== this.requestSequence) return;
+        result = this.cache.select(this.startInput.value, this.endInput.value, signals, this.filters);
+      }
       if (this.disposed || requestSequence !== this.requestSequence) return;
       if (!result || !Array.isArray(result.plot)) throw new Error("Invalid series response from the data API.");
-      if (result.fallbackHorizon) {
-        [this.startInput.value, this.endInput.value] = result.fallbackHorizon;
-        this.error.textContent = "Default horizon was empty; showing the latest available selected series.";
+      if (!result.plot.length && this.settings.range === "1M" && signals.length && Object.values(this.filters).every(values => values.length)) {
+        await this.ensureWindow(this.metadata.earliest, this.metadata.latest);
+        if (this.disposed || requestSequence !== this.requestSequence) return;
+        const history = this.cache.select(this.metadata.earliest, this.metadata.latest, signals, this.filters);
+        if (history?.plot.length) {
+          const latest = new Date(Math.max(...history.plot.map(row => row._epoch)) * 1000).toISOString().slice(0, 10);
+          this.endInput.value = latest;
+          this.startInput.value = dateBefore(latest, "1M") < this.metadata.earliest ? this.metadata.earliest : dateBefore(latest, "1M");
+          result = this.cache.select(this.startInput.value, this.endInput.value, signals, this.filters);
+          this.error.textContent = "Default horizon was empty; showing the latest available selected series.";
+        }
       }
       this.renderMetrics(result.statistics || []);
+      this.metrics.title = result.statisticsMode === "source" ? "Statistics from all source intervals in this window"
+        : "Statistics from displayed cached samples; use a narrower uncached window for native resolution";
+      this.mount.dataset.resolution = result.resolution;
+      this.resolutionLabel.textContent = `${result.resolution === "native" ? (result.downsampled ? "Native sample" : "Native") : result.resolution + " mean"} · ${result.statisticsMode === "source" ? "Source stats" : "Display stats"}`;
+      this.pendingView = { points: result.plot.length, resolution: result.resolution };
       this.renderChart(result.plot || []);
       this.settings = {
         ...this.settings,
@@ -418,10 +455,67 @@ export class ChartPanel {
         signals,
         start: this.startInput.value,
       };
-      saveSettings(this.settingsKey, this.settings);
+      this.scheduleSave();
     } catch (error) {
       if (!this.disposed && requestSequence === this.requestSequence) this.showError(error);
     }
+  }
+
+  scheduleSave() {
+    clearTimeout(this.saveTimer);
+    this.saveTimer = setTimeout(() => saveSettings(this.settingsKey, this.settings), 150);
+  }
+
+  viewRendered() {
+    if (!this.pendingView) return;
+    const detail = this.pendingView;
+    this.pendingView = null;
+    this.container.dispatchEvent(new CustomEvent("chart-view-updated", { detail }));
+  }
+
+  async ensureWindow(start, end) {
+    const cache = this.cache;
+    const signals = this.signals.map(signal => signal.key);
+    if (cache.find(start, end, signals, this.nodeValues.length ? this.nodeValues : undefined)) return;
+    for (let signalIndex = 0; signalIndex < signals.length; signalIndex += 8) {
+      const batch = signals.slice(signalIndex, signalIndex + 8);
+      const days = (Date.parse(end) - Date.parse(start)) / 86400000 + 1;
+      const nodeBatch = Math.max(1, Math.min(8, Math.floor(1500000 / (days * 288 * batch.length))));
+      const nodes = this.nodeValues.length ? this.nodeValues : [null];
+      for (let index = 0; index < nodes.length; index += nodeBatch) {
+        const subset = nodes.slice(index, index + nodeBatch);
+        if (cache.find(start, end, batch, subset[0] === null ? undefined : subset)) continue;
+        const query = { key: this.dataset.key, start, end, zone: "UTC", signals: batch,
+          filters: subset[0] === null ? {} : { node: subset }, frequency: "native", aggregation: "Mean" };
+        const identity = JSON.stringify(query);
+        if (!cache.pending.has(identity)) {
+          const pending = loadSeries(query).then(result => cache.add(query, result)).finally(() => cache.pending.delete(identity));
+          cache.pending.set(identity, pending);
+        }
+        await cache.pending.get(identity);
+        if (this.disposed) return;
+      }
+    }
+  }
+
+  prefetchHistory() {
+    if (this.disposed || !this.cache?.windows.length) return;
+    void this.ensureWindow(this.metadata.earliest, this.metadata.latest).catch(error => {
+      console.warn("Historical cache warm-up failed; ALL can retry.", error);
+    });
+  }
+
+  async reload(dataset) {
+    ++this.requestSequence;
+    this.dataset = dataset;
+    try {
+      this.metadata = await loadMetadata(dataset.key, dataset.revision);
+      if (this.disposed) return;
+      this.cache = feedCache(dataset.key, dataset.revision);
+      this.configureDates(); this.configureSignals();
+      await this.configureDimensions();
+      await this.refresh(); this.prefetchHistory();
+    } catch (error) { if (!this.disposed) this.showError(error); }
   }
 
   renderMetrics(statistics) {
@@ -455,12 +549,20 @@ export class ChartPanel {
   drawChart(rows) {
     if (this.disposed) return;
     this.lastRows = rows;
-    this.destroyChart();
-    this.legend.replaceChildren();
     if (!rows.length) {
+      const cleared = !this.selectedSignals().length || Object.values(this.filters).some(values => !values.length);
+      if (cleared && this.chart) {
+        // Clearing a selection should not discard the warm canvas/GPU context.
+        this.mount.style.visibility = "hidden";
+        this.chartLabels = [];
+        this.chart.setData([[], ...this.chart.series.slice(1).map(() => [])]);
+      } else this.destroyChart();
+      this.legend.replaceChildren();
       this.showState("NO_RECORDS_FOUND_FOR_DATE_RANGE");
+      this.viewRendered();
       return;
     }
+    this.mount.style.visibility = "";
     if (typeof window.uPlot !== "function") {
       this.showError(new Error("ERR_DEPENDENCY_LOAD_FAILED: uPlot missing"));
       return;
@@ -473,63 +575,80 @@ export class ChartPanel {
       return;
     }
     this.empty.hidden = true;
-    const labels = [...new Set(rows.map((row) => row.series))];
-    const timestamps = [...new Set(rows.map((row) => Math.floor(new Date(row.timestamp).getTime() / 1000)))].sort((a, b) => a - b);
+    const firstRows = new Map();
+    for (const row of rows) if (!firstRows.has(row.series)) firstRows.set(row.series, row);
+    const labels = [...firstRows.keys()];
+    const timestamps = [...new Set(rows.map(row => row._epoch ?? Date.parse(row.timestamp) / 1000))].sort((a, b) => a - b);
     const valuesBySeries = new Map(labels.map((label) => [label, new Map()]));
     for (const row of rows) {
-      const timestamp = Math.floor(new Date(row.timestamp).getTime() / 1000);
+      const timestamp = row._epoch ?? Date.parse(row.timestamp) / 1000;
       valuesBySeries.get(row.series).set(timestamp, row.value);
     }
     const data = [
       timestamps,
       ...labels.map((label) => timestamps.map((timestamp) => valuesBySeries.get(label).get(timestamp) ?? null)),
     ];
-    const rootStyles = getComputedStyle(document.body);
-    const text = rootStyles.getPropertyValue("--text-muted").trim();
-    const grid = rootStyles.getPropertyValue("--grid-line").trim();
-    this.chart = new window.uPlot({
-      width,
-      height,
-      padding: [0, 40, 18, 0],
-      scales: { x: { time: true } },
-      series: [
-        { value: (_plot, timestamp) => timestamp == null ? "" : new Date(timestamp * 1000).toISOString() },
-        ...labels.map((label) => ({
-          label,
-          ...traceStyle(rows.find(row => row.series === label)),
-          show: !this.hiddenSeries.has(label),
-          points: { show: false },
-        })),
-      ],
-      axes: [
-        {
-          stroke: text,
-          grid: { stroke: grid, width: 1, dash: [2, 3] },
-          ticks: { stroke: grid, width: 1 },
-          font: "10px Consolas, monospace",
+    const definitions = labels.map(label => ({ label, ...traceStyle(firstRows.get(label)),
+      show: !this.hiddenSeries.has(label), points: { show: false }, paths: emptyPaths, spanGaps: true }));
+    const changed = labels.join("\n") !== this.chartLabels?.join("\n");
+    if (this.chart) {
+      this.chart.batch(() => {
+        if (changed) {
+          for (let index = this.chart.series.length - 1; index > 0; index--) this.chart.delSeries(index);
+          for (const definition of definitions) this.chart.addSeries(definition);
+        }
+        this.chart.setData(data);
+      });
+      this.chartLabels = labels;
+      if (!changed) return;
+    } else {
+      const rootStyles = getComputedStyle(document.body);
+      const text = rootStyles.getPropertyValue("--text-muted").trim();
+      const grid = rootStyles.getPropertyValue("--grid-line").trim();
+      const renderer = new LineRenderer();
+      this.chart = new window.uPlot({
+        width,
+        height,
+        padding: [0, 40, 18, 0],
+        scales: { x: { time: true } },
+        hooks: { draw: [plot => renderer.draw(plot), () => this.viewRendered()], destroy: [() => renderer.dispose()] },
+        series: [
+          { value: (_plot, timestamp) => timestamp == null ? "" : new Date(timestamp * 1000).toISOString() },
+          ...definitions,
+        ],
+        axes: [
+          {
+            stroke: text,
+            grid: { stroke: grid, width: 1 },
+            ticks: { stroke: grid, width: 1 },
+            font: "10px Consolas, monospace",
+          },
+          {
+            side: 1,
+            stroke: text,
+            grid: { stroke: grid, width: 1 },
+            ticks: { stroke: grid, width: 1 },
+            font: "10px Consolas, monospace",
+            values: (_plot, values) => values.map((value) => Number(value).toLocaleString(undefined, { maximumFractionDigits: 2 })),
+          },
+        ],
+        cursor: {
+          show: true,
+          x: true,
+          y: true,
+        // Default marker factory creates elements required by dynamic delSeries.
+        // CSS hides the markers while retaining the crosshair.
+          drag: { setScale: false, x: false, y: false },
         },
-        {
-          side: 1,
-          stroke: text,
-          grid: { stroke: grid, width: 1, dash: [2, 3] },
-          ticks: { stroke: grid, width: 1 },
-          font: "10px Consolas, monospace",
-          values: (_plot, values) => values.map((value) => Number(value).toLocaleString(undefined, { maximumFractionDigits: 2 })),
-        },
-      ],
-      cursor: {
-        show: true,
-        x: true,
-        y: true,
-        points: { show: false },
-        drag: { setScale: false, x: false, y: false },
-      },
-      legend: { show: false },
-    }, data, this.mount);
+        legend: { show: false },
+      }, data, this.mount);
+      this.chartLabels = labels;
+    }
+    this.legend.replaceChildren();
     labels.forEach((label, index) => {
       const button = document.createElement("button");
       button.type = "button"; button.textContent = label; button.title = label;
-      button.style.setProperty("--trace-color", traceStyle(rows.find(row => row.series === label)).stroke);
+      button.style.setProperty("--trace-color", traceStyle(firstRows.get(label)).stroke);
       button.setAttribute("aria-pressed", String(!this.hiddenSeries.has(label)));
       button.addEventListener("click", () => {
         const show = this.hiddenSeries.has(label);
@@ -537,7 +656,7 @@ export class ChartPanel {
         this.chart.setSeries(index + 1, { show });
         button.setAttribute("aria-pressed", String(show));
         this.settings.hiddenSeries = [...this.hiddenSeries];
-        saveSettings(this.settingsKey, this.settings);
+        this.scheduleSave();
       });
       this.legend.append(button);
     });
@@ -553,8 +672,9 @@ export class ChartPanel {
       const height = this.mount.clientHeight;
       if (width <= 0 || height <= 0) return;
       try {
-        if (this.chart) this.chart.setSize({ width, height });
-        else if (this.lastRows.length) this.renderChart(this.lastRows);
+        if (this.chart) {
+          if (this.chart.width !== width || this.chart.height !== height) this.chart.setSize({ width, height });
+        } else if (this.lastRows.length) this.renderChart(this.lastRows);
       } catch (error) {
         this.showError(error, "CHART_RENDER_ERROR");
       }
@@ -577,6 +697,7 @@ export class ChartPanel {
   showError(error, code = "DATA_FETCH_ERROR") {
     console.error(code, error);
     this.lastRows = [];
+    this.pendingView = null;
     this.destroyChart();
     this.legend.replaceChildren();
     this.metrics.replaceChildren();
@@ -592,7 +713,10 @@ export class ChartPanel {
   dispose() {
     this.disposed = true;
     document.removeEventListener("commodities-theme-change", this.themeListener);
+    window.removeEventListener("pagehide", this.pageHideListener);
     this.resizeObserver?.disconnect();
+    clearTimeout(this.saveTimer);
+    saveSettings(this.settingsKey, this.settings);
     if (this.resizeFrame !== null) cancelAnimationFrame(this.resizeFrame);
     this.destroyChart();
   }
