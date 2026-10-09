@@ -1,0 +1,1 @@
+"""Dashboard labels and settings."""

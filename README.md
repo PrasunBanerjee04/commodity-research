@@ -61,6 +61,19 @@ python -m venv .venv
 See [OASIS usage and data fields](docs/caiso_oasis.md) for `run()` configuration,
 retention/publication limits, recovery, storage, and the report catalog.
 
+## Desk dashboard
+
+Inspect local lake datasets in a dense Streamlit workspace with independent tabs,
+split views, component-aware CAISO charts, and paged raw tables:
+
+```bash
+.venv/bin/python -m pip install -e '.[dashboard]'
+.venv/bin/python -m streamlit run app.py
+```
+
+See [dashboard usage and analytics](docs/dashboard.md) for controls, persistence,
+data formats and metric definitions.
+
 ## Documentation
 
 See [docs/](docs/) for infrastructure and model documentation.
