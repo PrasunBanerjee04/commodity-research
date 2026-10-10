@@ -149,3 +149,24 @@ test('malformed complete history cannot poison local canvas sampling', () => {
   assert.throws(()=>prepareHistory({timestamps:['bad'],lmp:[1],energy:[1],congestion:[1],loss:[1]}));
   assert.throws(()=>prepareHistory({timestamps:[],lmp:[1],energy:[],congestion:[],loss:[]}));
 });
+
+const {prepareTrace,sampleTrace,stackTraces}=await import('../src/comm_research/dashboard/ui/src/research_history.js');
+test('research display preserves extrema and exact nulls within its point budget',()=>{
+  const timestamps=Array.from({length:10000},(_,i)=>new Date(Date.UTC(2023,0,1)+i*300000).toISOString());
+  const values=timestamps.map((_,i)=>i===1234?10000:Math.sin(i));values[100]=null;
+  const trace=prepareTrace({timestamps,values,dimensions:{}});
+  assert.ok(Number.isNaN(trace.values[100]));
+  const indices=sampleTrace(trace,trace.epochs[0],trace.epochs.at(-1));
+  assert.ok(indices.length<=1500);assert.ok(indices.includes(1234));
+  assert.equal(indices[0],0);assert.equal(indices.at(-1),9999);
+  assert.throws(()=>prepareTrace({timestamps:['bad'],values:[1]}),/Invalid research/);
+});
+test('AS stacking rebases isolated services and does not fabricate missing MW',()=>{
+  const timestamps=['2023-01-01T00:00:00Z','2023-01-01T01:00:00Z'];
+  const nr=prepareTrace({timestamps,values:[10,10],dimensions:{anc_type:'NR'}});
+  const ru=prepareTrace({timestamps,values:[20,null],dimensions:{anc_type:'RU'}});
+  const stack=stackTraces([nr,ru],nr.epochs[0],nr.epochs.at(-1));
+  assert.deepEqual(stack[0].y,[10,10]);assert.deepEqual(stack[1].y,[30,null]);
+  assert.equal(stack[1].values[0],20);
+  assert.deepEqual(stackTraces([ru],nr.epochs[0],nr.epochs.at(-1))[0].y,[20,null]);
+});

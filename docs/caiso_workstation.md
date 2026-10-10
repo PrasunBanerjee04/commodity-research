@@ -48,6 +48,10 @@ mean the complete multi-year history has already downloaded.
   Layout and selections persist locally; prices and overviews do not persist in
   browser storage. The workstation and legacy dashboard have separate layouts.
 
+CRR prices, transmission overlays, and DAM ancillary-service stacks use the same
+dock and terminal styling. See [CAISO research views](caiso_research_views.md) for
+source aliases, controls, units, and the RAM query API.
+
 ## Schema and API
 
 | Parquet field | Meaning / API mapping |

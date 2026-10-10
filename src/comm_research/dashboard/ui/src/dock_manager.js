@@ -1,5 +1,6 @@
 import { ChartPanel } from "./chart_panel.js";
 import { CaisoPanel } from "./caiso_panel.js";
+import { ResearchPanel } from "./research_panel.js";
 
 export function canonicalDatasetPath(key) {
   const parts = String(key).replaceAll("\\", "/").split("/").filter(part => part && part !== ".");
@@ -47,7 +48,7 @@ export class DockManager {
                 if (!opened) this.onError(new Error("Popout window could not be opened. Allow popups for this workstation."));
               }).catch(this.onError);
             });
-            const Controller = dataset.transport === "node-history" ? CaisoPanel : ChartPanel;
+            const Controller = dataset.transport === "research-history" ? ResearchPanel : dataset.transport === "node-history" ? CaisoPanel : ChartPanel;
             chartPanel = new Controller(dataset, element, this.onError, params.settingsKey || id);
             if (!this.chartPanels.has(dataset.key)) this.chartPanels.set(dataset.key, chartPanel);
             return chartPanel.init();
@@ -86,7 +87,7 @@ export class DockManager {
     this.datasets = datasets;
     for (const [key, panel] of this.chartPanels) {
       const dataset = datasets.find(item => item.key === key);
-      if (dataset && panel.metadata && (refresh || dataset.revision !== panel.dataset.revision)) void panel.reload(dataset).catch(error => panel.showError(error));
+      if (dataset && (panel.metadata || panel.meta) && (refresh || dataset.revision !== panel.dataset.revision)) void panel.reload(dataset).catch(error => panel.showError(error));
       else if (!dataset) panel.showError(new Error("Dataset is no longer available. Rescan the lake."));
     }
   }

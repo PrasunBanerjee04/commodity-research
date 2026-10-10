@@ -34,6 +34,7 @@ from comm_research.dashboard.data.loader import (
     inspect_dataset,
 )
 from comm_research.dashboard.lake_api import LakeAPI, _dataset_json
+from comm_research.dashboard.research_lake import ResearchMemoryLake
 
 LOG = logging.getLogger("caiso.workstation")
 FEEDS = {"DAM": ("dam_lmp", "da_lmp"), "RTM": ("rtm_lmp", "rt_lmp")}
@@ -224,6 +225,8 @@ class CaisoMemoryLake:
                         earliest,
                         latest,
                     )
+                next_research = ResearchMemoryLake(self.con, self.root)
+                catalog = next_research.preload(catalog)
                 self.nodes = next_nodes
                 self.datasets = catalog
                 self.responses = OrderedDict()
@@ -288,6 +291,7 @@ class CaisoMemoryLake:
                         if item.get("market") == market:
                             item["preview"] = preview
                 self.con.execute("COMMIT")
+                self.research = next_research
             except Exception:
                 self.con.execute("ROLLBACK")
                 (
@@ -434,6 +438,32 @@ def create_app(
                 "nodes": lake.nodes[resolve_market(feed)],
                 "revision": lake.revision,
             }
+
+    @app.get("/api/research/metadata")
+    def research_metadata(request: Request, feed: str):
+        lake = request.app.state.lake
+        with lake.lock:
+            specification = lake.research.resolve(feed)
+            return lake.research.metadata[specification.name]
+
+    @app.get("/api/research/data")
+    def research_data(
+        request: Request,
+        feed: str,
+        entity: str | None = None,
+        start: str | None = None,
+        end: str | None = None,
+        filters: str = "{}",
+        max_points: int = 1500,
+    ):
+        if len(filters) > 16_000:
+            raise ValueError("Filters are too large")
+        decoded = json.loads(filters)
+        if not isinstance(decoded, dict):
+            raise TypeError("Filters must be a JSON object")
+        lake = request.app.state.lake
+        with lake.lock:
+            return lake.research.series(feed, entity, start, end, decoded, max_points)
 
     @app.get("/api/datasets")
     def datasets(request: Request):

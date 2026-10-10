@@ -2,6 +2,7 @@ import { request } from "./http.js";
 export { request } from "./http.js";
 import { clearQueryCaches } from "./query_cache.js";
 import { clearNodeHistories } from "./node_history.js";
+import { clearResearchHistories } from "./research_history.js";
 
 const lookups = new Map();
 
@@ -36,6 +37,6 @@ export function loadSeries(query) {
 
 export async function rescanCatalog() {
   const result = await request("/api/rescan", { method: "POST" });
-  lookups.clear(); clearQueryCaches(); clearNodeHistories();
+  lookups.clear(); clearQueryCaches(); clearNodeHistories(); clearResearchHistories();
   return result;
 }

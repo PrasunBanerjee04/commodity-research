@@ -5,6 +5,7 @@
   "description": "Institutional commodities dashboard browser libraries",
   "dependencies": {
     "dockview": "8.4.1",
+    "plotly.js-dist-min": "2.35.2",
     "uplot": "1.6.32"
   },
   "type": "module",
