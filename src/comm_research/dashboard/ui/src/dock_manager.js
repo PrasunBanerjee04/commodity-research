@@ -1,4 +1,5 @@
 import { ChartPanel } from "./chart_panel.js";
+import { CaisoPanel } from "./caiso_panel.js";
 
 export function canonicalDatasetPath(key) {
   const parts = String(key).replaceAll("\\", "/").split("/").filter(part => part && part !== ".");
@@ -8,9 +9,9 @@ export function canonicalDatasetPath(key) {
 
 const LAYOUT_STORAGE_KEY = "commodity-dock-layout";
 
-function readLayout() {
+function readLayout(key) {
   try {
-    return localStorage.getItem(LAYOUT_STORAGE_KEY);
+    return localStorage.getItem(key);
   } catch (error) {
     console.warn("Unable to read the saved workspace layout.", error);
     return null;
@@ -18,11 +19,12 @@ function readLayout() {
 }
 
 export class DockManager {
-  constructor({ mount, emptyState, onError }) {
+  constructor({ mount, emptyState, onError, layoutKey = LAYOUT_STORAGE_KEY, datasets = [] }) {
     this.mount = mount;
     this.emptyState = emptyState;
     this.onError = onError;
-    this.datasets = [];
+    this.layoutKey = layoutKey;
+    this.datasets = datasets;
     this.openPanels = new Map();
     this.chartPanels = new Map();
     this.rebuilding = false;
@@ -37,8 +39,10 @@ export class DockManager {
         return {
           element,
           init: ({ params }) => {
-            const dataset = { ...params.dataset, key: canonicalDatasetPath(params.dataset.key) };
-            chartPanel = new ChartPanel(dataset, element, this.onError, params.settingsKey || id);
+            const key = canonicalDatasetPath(params.dataset.key);
+            const dataset = { ...params.dataset, ...this.datasets.find(item => item.key === key), key };
+            const Controller = dataset.transport === "node-history" ? CaisoPanel : ChartPanel;
+            chartPanel = new Controller(dataset, element, this.onError, params.settingsKey || id);
             if (!this.chartPanels.has(dataset.key)) this.chartPanels.set(dataset.key, chartPanel);
             return chartPanel.init();
           },
@@ -76,7 +80,7 @@ export class DockManager {
     this.datasets = datasets;
     for (const [key, panel] of this.chartPanels) {
       const dataset = datasets.find(item => item.key === key);
-      if (dataset && panel.metadata && (refresh || dataset.revision !== panel.dataset.revision)) void panel.reload(dataset);
+      if (dataset && panel.metadata && (refresh || dataset.revision !== panel.dataset.revision)) void panel.reload(dataset).catch(error => panel.showError(error));
       else if (!dataset) panel.showError(new Error("Dataset is no longer available. Rescan the lake."));
     }
   }
@@ -104,7 +108,7 @@ export class DockManager {
   }
 
   restore() {
-    const serialized = readLayout();
+    const serialized = readLayout(this.layoutKey);
     if (!serialized) return false;
     try {
       this.rebuilding = true;
@@ -128,10 +132,11 @@ export class DockManager {
     if (this.rebuilding) return;
     try {
       if (!this.view.totalPanels) {
-        localStorage.removeItem(LAYOUT_STORAGE_KEY);
+        localStorage.removeItem(this.layoutKey);
         return;
       }
-      localStorage.setItem(LAYOUT_STORAGE_KEY, JSON.stringify(this.view.toJSON()));
+      // Startup overviews are transient data, not persistent layout settings.
+      localStorage.setItem(this.layoutKey, JSON.stringify(this.view.toJSON(), (key,value) => key === "preview" ? undefined : value));
     } catch (error) {
       this.onError(new Error(`Workspace layout could not be saved: ${error.message}`));
     }
@@ -155,6 +160,17 @@ export class DockManager {
       if (!candidates.some(item => item.key === dataset.key)) candidates.push(dataset);
     }
     if (activeDataset) candidates.sort((a, b) => (a.key === activeDataset.key ? -1 : b.key === activeDataset.key ? 1 : 0));
+    // Keep the institutional two-pane preset ordered DAM left, RTM right.
+    if (count === 2 && this.datasets.some(item => item.transport === "node-history")) {
+      const prices = ["DAM", "RTM"].map(market => this.datasets.find(item => item.market === market));
+      if (prices.every(Boolean)) {
+        for (const price of prices) if (!candidates.some(item => item.key === price.key)) candidates.push(price);
+        candidates.sort((a,b) => {
+          const rank = item => item.key === prices[0].key ? -2 : item.key === prices[1].key ? -1 : 0;
+          return rank(a)-rank(b);
+        });
+      }
+    }
     const datasets = [...new Map(candidates.map(dataset => [canonicalDatasetPath(dataset.key), dataset])).values()];
     this.rebuilding = true;
     const panels = datasets.map(dataset => this.openPanel(dataset));

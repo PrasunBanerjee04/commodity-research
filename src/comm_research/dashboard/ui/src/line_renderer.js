@@ -25,7 +25,8 @@ void main() {
 // segments on an offscreen WebGL canvas, then composite that bitmap once.
 // This avoids expensive dashed Path2D strokes without reducing observations.
 export class LineRenderer {
-  constructor() {
+  constructor({ thick = false } = {}) {
+    this.thick = thick;
     this.canvas = document.createElement("canvas");
     try {
       this.gl = this.canvas.getContext("webgl", {
@@ -90,7 +91,7 @@ export class LineRenderer {
     gl.enable(gl.BLEND);
     gl.blendFuncSeparate(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA, gl.ONE, gl.ONE_MINUS_SRC_ALPHA);
     const required = plot.series.reduce((size, series, index) => size + (index && series.show
-      ? Math.max(0, plot.data[index].reduce((n, value) => n + (value != null), 0) - 1) * 18 : 0), 0);
+      ? Math.max(0, plot.data[index].reduce((n, value) => n + (value != null), 0) - 1) * (this.thick ? 54 : 18) : 0), 0);
     if (required > this.vertices.length) this.vertices = new Float32Array(2 ** Math.ceil(Math.log2(required)));
     let offset = 0;
     const singlePoints = [];
@@ -121,8 +122,21 @@ export class LineRenderer {
         if (previous) {
           const dx = x - previous.x, dy = y - previous.y, length = Math.hypot(dx, dy);
           if (length) {
-            push(previous.x, previous.y, distance);
-            push(x, y, distance + length);
+            if (this.thick) {
+              // Explicit quads honor 1.5px/2px widths even where WebGL's
+              // native line-width range only supports a one-pixel hairline.
+              const half = series.width * ratio / 2;
+              const nx = -dy / length * half, ny = dx / length * half;
+              push(previous.x + nx, previous.y + ny, distance);
+              push(previous.x - nx, previous.y - ny, distance);
+              push(x + nx, y + ny, distance + length);
+              push(x + nx, y + ny, distance + length);
+              push(previous.x - nx, previous.y - ny, distance);
+              push(x - nx, y - ny, distance + length);
+            } else {
+              push(previous.x, previous.y, distance);
+              push(x, y, distance + length);
+            }
             distance += length;
           }
         }
@@ -131,7 +145,7 @@ export class LineRenderer {
       if (offset === firstOffset && previous) singlePoints.push({ ...previous, stroke: series.stroke(plot, index) });
     }
     gl.bufferData(gl.ARRAY_BUFFER, this.vertices.subarray(0, offset), gl.DYNAMIC_DRAW);
-    gl.drawArrays(gl.LINES, 0, offset / 9);
+    gl.drawArrays(this.thick ? gl.TRIANGLES : gl.LINES, 0, offset / 9);
     plot.ctx.drawImage(this.canvas, 0, 0);
     // One observation has no line segment; keep that valid price visible.
     for (const point of singlePoints) {

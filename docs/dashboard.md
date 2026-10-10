@@ -1,5 +1,9 @@
 # Commodities desk dashboard
 
+For the preloaded DuckDB CAISO workstation (`python server.py`, port 8000), see
+[CAISO workstation](caiso_workstation.md). This page describes the generic
+Polars dashboard and its bounded `/api/series` API on port 8502.
+
 From the repository root:
 
 ```bash

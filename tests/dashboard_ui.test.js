@@ -118,3 +118,28 @@ test('a malformed successful response produces a clear data error', async () => 
     await assert.rejects(request('/api/series'), /Invalid JSON response from the data API/);
   } finally { global.fetch = original; }
 });
+
+const {prepareHistory, displayData, COMPONENTS} = await import('../src/comm_research/dashboard/ui/src/node_history.js');
+test('complete CAISO history retains exact prices while bounding every local display', () => {
+  const count = 100000;
+  const payload = {node:'NP15',timestamps:Array.from({length:count},(_,i)=>new Date(Date.UTC(2020,0,1)+i*300000).toISOString())};
+  for (const {key} of COMPONENTS) payload[key] = Array.from({length:count},(_,i)=>30+Math.sin(i)*20);
+  payload.congestion[45678] = 12345;
+  payload.loss[10] = null;
+  const history = prepareHistory(payload);
+  assert.equal(history.epochs.length,count);
+  assert.equal(history.values[2][45678],12345);
+  assert.ok(Number.isNaN(history.values[3][10]));
+  for (const days of [1,5,30,365,10000]) {
+    const end = history.epochs.at(-1), data = displayData(history,end-days*86400,end);
+    assert.ok(data[0].length<=1500); assert.equal(data[0].at(-1),end);
+    assert.ok(data.every(column=>column.length===data[0].length));
+  }
+  assert.ok(displayData(history,history.epochs[0],history.epochs.at(-1))[3].includes(12345));
+  assert.ok(displayData(history,history.epochs[0],history.epochs.at(-1),320)[0].length<=320);
+  assert.deepEqual(COMPONENTS.map(component=>component.color),['#2962FF','#089981','#F23645','#FF9800']);
+});
+test('malformed complete history cannot poison local canvas sampling', () => {
+  assert.throws(()=>prepareHistory({timestamps:['bad'],lmp:[1],energy:[1],congestion:[1],loss:[1]}));
+  assert.throws(()=>prepareHistory({timestamps:[],lmp:[1],energy:[],congestion:[],loss:[]}));
+});

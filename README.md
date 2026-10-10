@@ -63,18 +63,20 @@ retention/publication limits, recovery, storage, and the report catalog.
 
 ## Desk dashboard
 
-Inspect local lake datasets in a fast, local HTML dashboard with component-aware
-CAISO charts, market metrics, filters and paged raw tables:
+Inspect local lake datasets with cached CAISO history, local chart controls,
+and a dockable workspace:
 
 ```bash
 .venv/bin/python -m pip install -e '.[dashboard]'
-.venv/bin/python app.py
+.venv/bin/python server.py
 ```
 
-The dashboard opens at `http://127.0.0.1:8502`. Use `--port` to choose another
-port or set `COMMODITY_LAKE_ROOT` to use a different local lake. See
-[dashboard usage and analytics](docs/dashboard.md) for controls, data formats
-and metric definitions.
+The workstation uses port **8000**. CAISO prices preload into in-memory DuckDB
+at startup; node histories are cached in the browser for local range selection,
+zoom, pan, and component visibility. Use `--lake /path/to/lake` or `--port` to
+choose another lake or port. See [CAISO workstation](docs/caiso_workstation.md).
+The general-purpose Polars dashboard remains available with `python app.py`
+on port 8502; see [generic analytics](docs/dashboard.md).
 
 ## Documentation
 

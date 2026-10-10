@@ -14,11 +14,13 @@ function showStatus(error) {
 let dock;
 let tree;
 
-function initializeWorkspace() {
+function initializeWorkspace(datasets) {
   dock = new DockManager({
     mount: document.querySelector("#dockview"),
     emptyState: document.querySelector("#empty-workspace"),
     onError: showStatus,
+    layoutKey: document.documentElement.classList.contains("caiso-workstation") ? "commodity-history-dock-layout" : "commodity-dock-layout",
+    datasets,
   });
   tree = new TreeNavigator({
     root: datasetTree,
@@ -50,7 +52,8 @@ async function updateCatalog(datasets, refresh = false) {
 }
 
 try {
-  initializeWorkspace();
+  const datasets = await loadCatalog();
+  initializeWorkspace(datasets);
   const theme = localStorage.getItem("commodity-theme") || "dark";
   dock.setTheme(theme);
   document.querySelector("#theme-toggle").addEventListener("click", () => {
@@ -75,7 +78,7 @@ try {
       button.disabled = false;
     }
   });
-  await updateCatalog(await loadCatalog());
+  await updateCatalog(datasets);
 } catch (error) {
   console.error("Workspace initialization failed", error);
   showStatus(error);

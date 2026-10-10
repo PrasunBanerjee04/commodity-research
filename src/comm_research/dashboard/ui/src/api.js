@@ -1,4 +1,7 @@
+import { request } from "./http.js";
+export { request } from "./http.js";
 import { clearQueryCaches } from "./query_cache.js";
+import { clearNodeHistories } from "./node_history.js";
 
 const lookups = new Map();
 
@@ -10,20 +13,6 @@ function lookup(identity, path) {
   return lookups.get(identity);
 }
 
-export async function request(path, options = {}) {
-  const response = await fetch(path, options);
-  let payload;
-  try {
-    payload = await response.json();
-  } catch {
-    if (!response.ok) throw new Error(`HTTP ${response.status}: ${response.statusText || "Request failed"}`);
-    throw new Error("Invalid JSON response from the data API.");
-  }
-  if (!response.ok) {
-    throw new Error(`HTTP ${response.status}: ${payload?.error || response.statusText || "Request failed"}`);
-  }
-  return payload;
-}
 
 export function loadCatalog() {
   return request("/api/datasets");
@@ -47,6 +36,6 @@ export function loadSeries(query) {
 
 export async function rescanCatalog() {
   const result = await request("/api/rescan", { method: "POST" });
-  lookups.clear(); clearQueryCaches();
+  lookups.clear(); clearQueryCaches(); clearNodeHistories();
   return result;
 }
