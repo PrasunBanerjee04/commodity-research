@@ -1,22 +1,30 @@
-export async function request(path, options = {}) {
-  const response = await fetch(path, options);
-  const payload = await response.json();
-  if (!response.ok) {
-    throw new Error(payload.error || `Request failed: ${response.status}`);
+import { request } from "./http.js";
+export { request } from "./http.js";
+import { clearQueryCaches } from "./query_cache.js";
+import { clearNodeHistories } from "./node_history.js";
+import { clearResearchHistories } from "./research_history.js";
+
+const lookups = new Map();
+
+function lookup(identity, path) {
+  if (!lookups.has(identity)) {
+    const pending = request(path).catch(error => { lookups.delete(identity); throw error; });
+    lookups.set(identity, pending);
   }
-  return payload;
+  return lookups.get(identity);
 }
+
 
 export function loadCatalog() {
   return request("/api/datasets");
 }
 
-export function loadMetadata(key) {
-  return request(`/api/metadata?key=${encodeURIComponent(key)}`);
+export function loadMetadata(key, revision = "") {
+  return lookup(`metadata:${key}:${revision}`, `/api/metadata?key=${encodeURIComponent(key)}`);
 }
 
-export function loadOptions(key, dimension) {
-  return request(`/api/options?key=${encodeURIComponent(key)}&dimension=${encodeURIComponent(dimension)}`);
+export function loadOptions(key, dimension, revision = "") {
+  return lookup(`options:${key}:${revision}:${dimension}`, `/api/options?key=${encodeURIComponent(key)}&dimension=${encodeURIComponent(dimension)}`);
 }
 
 export function loadSeries(query) {
@@ -27,6 +35,8 @@ export function loadSeries(query) {
   });
 }
 
-export function rescanCatalog() {
-  return request("/api/rescan", { method: "POST" });
+export async function rescanCatalog() {
+  const result = await request("/api/rescan", { method: "POST" });
+  lookups.clear(); clearQueryCaches(); clearNodeHistories(); clearResearchHistories();
+  return result;
 }

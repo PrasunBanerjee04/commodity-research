@@ -1,12 +1,14 @@
-"""Fingerprint-cached, lazy Parquet/Arrow discovery and desk analytics."""
+"""Fingerprint-cached RAM snapshots, indexed views and bounded desk analytics."""
 
 from __future__ import annotations
 
 import os
-from dataclasses import dataclass
+from collections import OrderedDict
+from dataclasses import dataclass, replace
 from datetime import date, datetime, time, timedelta, timezone
 from functools import lru_cache
 from pathlib import Path
+from threading import Lock, RLock
 from zoneinfo import ZoneInfo
 
 import polars as pl
@@ -20,11 +22,18 @@ from comm_research.dashboard.config.taxonomy import (
     display_name,
     metric_unit,
 )
+from comm_research.infra.tools.caiso_schema import (
+    COMPONENT_ALIASES,
+    normalize_schema,
+    utc_expression,
+)
 
 FORMATS = {".parquet", ".arrow", ".ipc", ".feather"}
-MAX_POINTS_PER_TRACE = 4_000
+MAX_POINTS_PER_TRACE = 1_500
 MAX_ANALYTIC_ROWS = 2_000_000
 MAX_TRACES = 64
+MAX_SESSION_ROWS = 5_000_000
+MEMORY_CACHE_BYTES = 512 * 1024 * 1024
 FilterSet = tuple[tuple[str, tuple[str, ...]], ...]
 
 
@@ -70,6 +79,7 @@ class Signal:
     unit: str
     selector_column: str | None = None
     selector_value: str | None = None
+    component: str | None = None
 
 
 @dataclass(frozen=True)
@@ -89,6 +99,20 @@ class SeriesBundle:
     observations: int
     points: int
     downsampled: bool
+    fallback_horizon: tuple[date, date] | None = None
+    resolution: str = "native"
+
+
+@dataclass
+class CachedFeed:
+    frame: pl.DataFrame
+    node_ranges: dict[str, tuple[int, int]]
+    bytes: int
+
+
+_feeds: OrderedDict[Dataset, CachedFeed] = OrderedDict()
+_feed_lock = RLock()
+_cold_load_lock = Lock()
 
 
 @lru_cache(maxsize=8)
@@ -175,10 +199,15 @@ def _scan(
             and not partition_start <= partition_day <= partition_end
         ):
             continue
-        if path.suffix.lower() == ".parquet":
-            frames.append(pl.scan_parquet(path, hive_partitioning=False))
-        else:
-            frames.append(pl.scan_ipc(path, memory_map=True))
+        frame = (
+            pl.scan_parquet(path, hive_partitioning=False)
+            if path.suffix.lower() == ".parquet"
+            else pl.scan_ipc(path, memory_map=True)
+        )
+        try:
+            frames.append(normalize_schema(frame, dataset.key))
+        except ValueError as error:
+            raise LakeError(str(error)) from error
     if not frames and (start or end):
         return _scan(dataset)
     if not frames:
@@ -188,19 +217,115 @@ def _scan(
 
 
 def _timestamp(frame: pl.LazyFrame, column: str) -> pl.Expr:
-    dtype = frame.collect_schema()[column]
-    value = pl.col(column)
-    if dtype == pl.Date:
-        return value.cast(pl.Datetime("us")).dt.replace_time_zone("UTC")
-    if isinstance(dtype, pl.Datetime):
-        if dtype.time_zone:
-            return value.dt.convert_time_zone("UTC").cast(pl.Datetime("us", "UTC"))
-        return value.dt.replace_time_zone("UTC").cast(pl.Datetime("us", "UTC"))
-    if dtype == pl.String:
-        return value.str.to_datetime(time_zone="UTC", strict=False).cast(
-            pl.Datetime("us", "UTC")
+    return utc_expression(frame, column)
+
+
+def _time_column(schema: pl.Schema) -> str | None:
+    return next((column for column in TIME_COLUMNS if column in schema), None) or next(
+        (
+            column
+            for column, dtype in schema.items()
+            if isinstance(dtype, pl.Datetime) or dtype == pl.Date
+        ),
+        None,
+    )
+
+
+def cached_feed(dataset: Dataset) -> CachedFeed:
+    """Materialize once per fingerprint; indexed node blocks and time slices stay in RAM.
+
+    Cold loads are serialized without blocking warm snapshot lookups.
+    Rescan clears snapshots; LRU eviction bounds retained source memory to 512 MiB.
+    """
+    with _feed_lock:
+        if dataset in _feeds:
+            _feeds.move_to_end(dataset)
+            return _feeds[dataset]
+    with _cold_load_lock:
+        with _feed_lock:
+            if dataset in _feeds:
+                _feeds.move_to_end(dataset)
+                return _feeds[dataset]
+        source = _scan(dataset)
+        schema = source.collect_schema()
+        if any(column.startswith("__desk_") for column in schema):
+            raise LakeError("Source columns use reserved dashboard field names.")
+        column = _time_column(schema)
+        if column:
+            source = source.with_columns(
+                _timestamp(source, column).alias("__desk_time")
+            )
+        frame = source.limit(MAX_SESSION_ROWS + 1).collect(engine="streaming")
+        if frame.height > MAX_SESSION_ROWS:
+            raise LakeError(
+                "Feed exceeds five million cached rows; split it into narrower datasets."
+            )
+        size = frame.estimated_size()
+        if size > MEMORY_CACHE_BYTES:
+            raise LakeError(
+                "Feed exceeds the 512 MiB memory cache; split it into narrower datasets."
+            )
+        sort_columns = [c for c in ("node", "__desk_time") if c in frame.columns]
+        if sort_columns:
+            frame = frame.sort(sort_columns, nulls_last=True)
+        ranges = {}
+        if "node" in frame.columns:
+            offset = 0
+            for node, length in (
+                frame.group_by("node", maintain_order=True).len().iter_rows()
+            ):
+                ranges[node] = (offset, length)
+                offset += length
+        snapshot = CachedFeed(frame, ranges, size)
+        with _feed_lock:
+            while _feeds and (
+                len(_feeds) >= 8
+                or sum(item.bytes for item in _feeds.values()) + size
+                > MEMORY_CACHE_BYTES
+            ):
+                _feeds.popitem(last=False)
+            _feeds[dataset] = snapshot
+            return snapshot
+
+
+def _memory_slice(
+    dataset: Dataset,
+    start: date | None,
+    end: date | None,
+    zone: str,
+    filters: FilterSet,
+) -> pl.LazyFrame:
+    snapshot = cached_feed(dataset)
+    selected_nodes = dict(filters).get("node")
+    blocks = [snapshot.frame]
+    if selected_nodes is not None and snapshot.node_ranges:
+        blocks = [
+            snapshot.frame.slice(*snapshot.node_ranges[node])
+            for node in selected_nodes
+            if node in snapshot.node_ranges
+        ]
+    bounds = (
+        _utc_bounds(start, end, zone) if start is not None and end is not None else None
+    )
+    # Each node block is sorted, so a date change needs two binary searches, not a scan.
+    if (
+        bounds
+        and "__desk_time" in snapshot.frame.columns
+        and (selected_nodes is not None or not snapshot.node_ranges)
+    ):
+        sliced = []
+        for block in blocks:
+            times = block["__desk_time"]
+            lower = times.search_sorted(bounds[0], side="left")
+            upper = times.search_sorted(bounds[1], side="left")
+            sliced.append(block.slice(lower, upper - lower))
+        blocks = sliced
+    frame = (pl.concat(blocks) if blocks else snapshot.frame.head(0)).lazy()
+    if bounds and "__desk_time" in snapshot.frame.columns:
+        frame = frame.filter(
+            (pl.col("__desk_time") >= bounds[0]) & (pl.col("__desk_time") < bounds[1])
         )
-    raise LakeError(f"{column} is not a supported time column.")
+    return frame
 
 
 def _utc_bounds(start: date, end: date, zone: str) -> tuple[datetime, datetime]:
@@ -220,17 +345,18 @@ def _filtered(
     end: date | None,
     zone: str,
     filters: FilterSet,
+    prune_partitions: bool = True,
 ) -> pl.LazyFrame:
-    frame = _scan(dataset, start, end)
+    frame = _memory_slice(dataset, start, end, zone, filters)
     schema = frame.collect_schema()
+    missing = [column for column, _ in metadata.schema if column not in schema]
+    if missing:
+        frame = frame.with_columns(pl.lit(None).alias(column) for column in missing)
     for column, values in filters:
         if column not in metadata.dimensions:
             raise LakeError(f"Unsupported dimension: {column}")
         frame = frame.filter(pl.col(column).cast(pl.String).is_in(values))
     if metadata.time_column:
-        frame = frame.with_columns(
-            _timestamp(frame, metadata.time_column).alias("__desk_time")
-        )
         if start is not None and end is not None:
             lower, upper = _utc_bounds(start, end, zone)
             frame = frame.filter(
@@ -240,30 +366,19 @@ def _filtered(
         raise LakeError(
             "This table has no recognized time field; inspect its raw rows."
         )
-    if any(column.startswith("__desk_") for column in schema):
-        raise LakeError("Source columns use reserved dashboard field names.")
     return frame
 
 
 @lru_cache(maxsize=64)
 def inspect_dataset(dataset: Dataset) -> Metadata:
-    frame = _scan(dataset)
-    schema = frame.collect_schema()
-    time_column = next((column for column in TIME_COLUMNS if column in schema), None)
-    if time_column is None:
-        time_column = next(
-            (
-                column
-                for column, dtype in schema.items()
-                if isinstance(dtype, pl.Datetime) or dtype == pl.Date
-            ),
-            None,
-        )
+    frame = cached_feed(dataset).frame.lazy()
+    schema = frame.drop("__desk_time", strict=False).collect_schema()
+    time_column = _time_column(schema)
     earliest = latest = None
     if time_column:
         bounds = frame.select(
-            _timestamp(frame, time_column).min().alias("min"),
-            _timestamp(frame, time_column).max().alias("max"),
+            pl.col("__desk_time").min().alias("min"),
+            pl.col("__desk_time").max().alias("max"),
         ).collect(engine="streaming")
         earliest, latest = bounds.row(0)
     numeric = [
@@ -307,15 +422,23 @@ def inspect_dataset(dataset: Dataset) -> Metadata:
                         metric_unit(dataset.key, column),
                         selector,
                         value,
+                        value if value in COMPONENT_NAMES else None,
                     )
                 )
         else:
             signals.append(
                 Signal(
-                    column,
-                    display_name(column),
+                    COMPONENT_ALIASES.get(column.upper(), column)
+                    if "lmp" in dataset.key
+                    else column,
+                    COMPONENT_NAMES.get(
+                        COMPONENT_ALIASES.get(column.upper(), ""), display_name(column)
+                    ),
                     column,
                     metric_unit(dataset.key, column),
+                    component=COMPONENT_ALIASES.get(column.upper())
+                    if "lmp" in dataset.key
+                    else None,
                 )
             )
     dimensions = tuple(
@@ -352,14 +475,14 @@ def inspect_dataset(dataset: Dataset) -> Metadata:
 def dimension_options(dataset: Dataset, column: str) -> tuple[str, ...]:
     if column not in inspect_dataset(dataset).dimensions:
         raise LakeError("Unsupported dimension.")
-    values = (
-        _scan(dataset)
+    query = (
+        cached_feed(dataset)
+        .frame.lazy()
         .select(pl.col(column).cast(pl.String).drop_nulls().unique().sort())
-        .limit(5_001)
-        .collect(engine="streaming")[column]
-        .to_list()
     )
-    return tuple(values[:5_000])
+    if column != "node":
+        query = query.limit(5_000)
+    return tuple(query.collect(engine="streaming")[column].to_list())
 
 
 def _signal_rows(
@@ -380,22 +503,44 @@ def _signal_rows(
     )
     expression = pl.lit(None, dtype=pl.String)
     unit = pl.lit(None, dtype=pl.String)
+    component = pl.lit(None, dtype=pl.String)
+    signal_key = pl.lit(None, dtype=pl.String)
     for signal in signals:
         condition = pl.col("__desk_metric") == signal.column
         if signal.selector_column:
             condition &= pl.col(signal.selector_column) == signal.selector_value
         expression = pl.when(condition).then(pl.lit(signal.label)).otherwise(expression)
+        signal_key = pl.when(condition).then(pl.lit(signal.key)).otherwise(signal_key)
         unit = pl.when(condition).then(pl.lit(signal.unit)).otherwise(unit)
+        component = (
+            pl.when(condition).then(pl.lit(signal.component)).otherwise(component)
+        )
     labels: list[pl.Expr] = [expression]
     labels.extend(pl.col(column).fill_null("∅") for column in metadata.dimensions)
     return (
         frame.with_columns(
             pl.concat_str(labels, separator=" · ").alias("series"),
             unit.alias("unit"),
+            component.alias("component"),
+            signal_key.alias("signal"),
+            (
+                pl.col("node")
+                if "node" in metadata.dimensions
+                else pl.lit(None, dtype=pl.String)
+            ).alias("node"),
             pl.col("__desk_value").cast(pl.Float64).alias("value"),
         )
         .filter(expression.is_not_null() & pl.col("value").is_finite())
-        .select(pl.col("__desk_time").alias("timestamp"), "series", "value", "unit")
+        .select(
+            pl.col("__desk_time").alias("timestamp"),
+            "series",
+            "value",
+            "unit",
+            "component",
+            "node",
+            "signal",
+            *[column for column in metadata.dimensions if column != "node"],
+        )
         .unique(subset=["timestamp", "series", "value", "unit"], maintain_order=True)
     )
 
@@ -481,10 +626,26 @@ def load_series(
     filters: FilterSet = (),
     frequency: str = "native",
     aggregation: str = "Mean",
+    fallback_to_latest: bool = False,
+    prune_partitions: bool = True,
 ) -> SeriesBundle:
     metadata = inspect_dataset(dataset)
     if not metadata.time_column:
         raise LakeError("No recognized time field; switch to raw data.")
+    available = {signal.key for signal in metadata.signals}
+    signal_keys = tuple(
+        dict.fromkeys(
+            key
+            if key in available
+            else ":".join(
+                (
+                    *key.split(":")[:-1],
+                    COMPONENT_ALIASES.get(key.split(":")[-1], key.split(":")[-1]),
+                )
+            )
+            for key in signal_keys
+        )
+    )
     selected = tuple(signal for signal in metadata.signals if signal.key in signal_keys)
     if set(signal_keys) - {signal.key for signal in selected}:
         raise LakeError(
@@ -498,14 +659,25 @@ def load_series(
     ):
         raise LakeError("Invalid frequency or aggregation.")
     rows = _signal_rows(
-        _filtered(dataset, metadata, start, end, zone, filters), metadata, selected
+        _filtered(dataset, metadata, start, end, zone, filters, prune_partitions),
+        metadata,
+        selected,
     )
     rows = rows.sort("timestamp", maintain_order=True)
     if frequency != "native":
         rows = rows.with_columns(pl.col("timestamp").dt.truncate(frequency))
     value = pl.col("value").mean() if aggregation == "Mean" else pl.col("value").last()
     series = (
-        rows.group_by("timestamp", "series", "unit", maintain_order=True)
+        rows.group_by(
+            "timestamp",
+            "series",
+            "unit",
+            "component",
+            "node",
+            "signal",
+            *[column for column in metadata.dimensions if column != "node"],
+            maintain_order=True,
+        )
         .agg(value.alias("value"), pl.len().alias("observations"))
         .limit(MAX_ANALYTIC_ROWS + 1)
         .collect(engine="streaming")
@@ -516,17 +688,67 @@ def load_series(
             "More than two million intervals selected. Narrow dates/series or choose hourly/daily frequency."
         )
     if series.is_empty():
+        if fallback_to_latest and all(values for _, values in filters):
+            latest = (
+                _signal_rows(
+                    _filtered(dataset, metadata, None, None, zone, filters),
+                    metadata,
+                    selected,
+                )
+                .select(pl.col("timestamp").max())
+                .collect(engine="streaming")
+                .item()
+            )
+            if latest is not None:
+                day = latest.astimezone(ZoneInfo(zone)).date()
+                earliest = metadata.earliest.astimezone(ZoneInfo(zone)).date()
+                horizon = (max(earliest, day - timedelta(days=29)), day)
+                bundle = load_series(
+                    dataset,
+                    *horizon,
+                    zone,
+                    signal_keys,
+                    filters,
+                    frequency,
+                    aggregation,
+                    prune_partitions=False,
+                )
+                return replace(bundle, fallback_horizon=horizon)
         return SeriesBundle(series, pl.DataFrame(), 0, 0, False)
     if series["series"].n_unique() > MAX_TRACES:
         raise LakeError("More than 64 traces selected. Narrow the series filters.")
     stats = summarize(series)
-    plot = reduce_plot_points(series)
+    resolution = frequency
+    display = series
+    window_days = (end - start).days + 1
+    if frequency == "native" and window_days > 7:
+        trace = series.filter(pl.col("series") == series["series"][0])
+        interval = trace["timestamp"].diff().dt.total_seconds().drop_nulls().median()
+        if interval is not None and 0 < interval < 3600:
+            resolution = "1h" if window_days < 60 else "4h"
+            display = (
+                series.with_columns(pl.col("timestamp").dt.truncate(resolution))
+                .group_by(
+                    "timestamp",
+                    "series",
+                    "unit",
+                    "component",
+                    "node",
+                    "signal",
+                    *[column for column in metadata.dimensions if column != "node"],
+                    maintain_order=True,
+                )
+                .agg(pl.col("value").mean())
+                .sort("timestamp")
+            )
+    plot = reduce_plot_points(display)
     return SeriesBundle(
         plot,
         stats,
         series["observations"].sum(),
         series.height,
         plot.height < series.height,
+        resolution=resolution,
     )
 
 
@@ -565,6 +787,8 @@ def load_raw_page(
 
 
 def clear_caches() -> None:
+    with _cold_load_lock, _feed_lock:
+        _feeds.clear()
     for function in (
         discover_lake,
         inspect_dataset,

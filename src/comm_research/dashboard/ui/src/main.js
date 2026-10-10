@@ -11,19 +11,24 @@ function showStatus(error) {
   status.textContent = error.message;
 }
 
-const dock = new DockManager({
-  mount: document.querySelector("#dockview"),
-  emptyState: document.querySelector("#empty-workspace"),
-  onError: showStatus,
-});
-const tree = new TreeNavigator({
-  root: datasetTree,
-  search: document.querySelector("#dataset-search"),
-  count: datasetCount,
-  onOpen: (dataset) => {
-    dock.openPanel(dataset);
-  },
-});
+let dock;
+let tree;
+
+function initializeWorkspace(datasets) {
+  dock = new DockManager({
+    mount: document.querySelector("#dockview"),
+    emptyState: document.querySelector("#empty-workspace"),
+    onError: showStatus,
+    layoutKey: document.documentElement.classList.contains("caiso-workstation") ? "commodity-history-dock-layout" : "commodity-dock-layout",
+    datasets,
+  });
+  tree = new TreeNavigator({
+    root: datasetTree,
+    search: document.querySelector("#dataset-search"),
+    count: datasetCount,
+    onOpen: (dataset) => dock.openPanel(dataset),
+  });
+}
 
 function setTheme(theme) {
   localStorage.setItem("commodity-theme", theme);
@@ -31,17 +36,24 @@ function setTheme(theme) {
   document.querySelector("#theme-toggle").textContent = theme === "light" ? "DARK" : "LIGHT";
 }
 
-async function updateCatalog(datasets) {
-  dock.setDatasets(datasets);
+async function updateCatalog(datasets, refresh = false) {
+  dock.setDatasets(datasets, refresh);
   tree.setDatasets(datasets);
   if (!datasets.length) {
     showStatus(new Error("No data lake feeds were discovered."));
     return;
   }
-  if (dock.view.totalPanels === 0) dock.openPanel(datasets[0]);
+  if (dock.view.totalPanels === 0) {
+    const dam = datasets.find(dataset => /\/caiso\/(dam_lmp|da_lmp)$/.test(dataset.key));
+    const rtm = datasets.find(dataset => /\/caiso\/(rtm_lmp|rt_lmp)$/.test(dataset.key));
+    const first = dock.openPanel(dam || rtm || datasets[0]);
+    if (dam && rtm) dock.openPanel(rtm, { referencePanel: first.id, direction: "right" });
+  }
 }
 
 try {
+  const datasets = await loadCatalog();
+  initializeWorkspace(datasets);
   const theme = localStorage.getItem("commodity-theme") || "dark";
   dock.setTheme(theme);
   document.querySelector("#theme-toggle").addEventListener("click", () => {
@@ -54,18 +66,25 @@ try {
     navigator.classList.toggle("collapsed");
   });
   document.querySelector("#rescan-button").addEventListener("click", async (event) => {
-    event.currentTarget.disabled = true;
+    const button = event.currentTarget;
+    button.disabled = true;
     status.textContent = "RESCANNING DATA LAKE…";
     try {
-      await updateCatalog(await rescanCatalog());
+      await updateCatalog(await rescanCatalog(), true);
       status.textContent = "";
     } catch (error) {
       showStatus(error);
     } finally {
-      event.currentTarget.disabled = false;
+      button.disabled = false;
     }
   });
-  await updateCatalog(await loadCatalog());
+  await updateCatalog(datasets);
 } catch (error) {
+  console.error("Workspace initialization failed", error);
   showStatus(error);
+  if (!dock || dock.view.totalPanels === 0) {
+    const emptyState = document.querySelector("#empty-workspace");
+    emptyState.replaceChildren(document.createTextNode(`WORKSPACE_LOAD_ERROR: ${error.message}`));
+    emptyState.hidden = false;
+  }
 }

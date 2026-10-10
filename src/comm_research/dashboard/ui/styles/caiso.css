@@ -1,0 +1,73 @@
+.caiso-workstation { color-scheme: dark; }
+.caiso-panel {
+  display: flex;
+  flex-direction: column;
+  width: 100%;
+  height: 100%;
+  min-height: 0;
+  background: #131722;
+  border: 1px solid #2A2E39;
+  overflow: auto;
+}
+.caiso-ribbon {
+  display: flex;
+  flex: 0 0 auto;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 4px;
+  padding: 3px 6px;
+  min-height: 28px;
+  border-bottom: 1px solid #2A2E39;
+  background: #131722;
+}
+.caiso-node {
+  max-width: 220px;
+  height: 20px;
+  border: 1px solid #2A2E39;
+  background: #131722;
+  padding: 0 4px;
+  font: 10px Consolas, monospace;
+}
+.caiso-viewport {
+  position: relative;
+  flex: 1 1 auto;
+  min-height: 250px;
+  width: 100%;
+  overflow: hidden;
+  background: #131722;
+}
+.caiso-chart { position: absolute; inset: 0; contain: strict; }
+.caiso-empty {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: #E53935;
+  font: 11px Consolas, monospace;
+  pointer-events: none;
+}
+.caiso-empty[hidden], .caiso-tooltip[hidden] { display: none; }
+.caiso-tooltip {
+  position: absolute;
+  right: 72px;
+  top: 8px;
+  padding: 8px;
+  border: 1px solid #2A2E39;
+  background: #131722ee;
+  font: 11px Consolas, monospace;
+  pointer-events: none;
+  color: #D1D4DC;
+}
+.caiso-tooltip-time { margin-bottom: 5px; }
+.caiso-tooltip-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 24px;
+  padding: 2px 0;
+  font-variant-numeric: tabular-nums;
+}
+.caiso-tooltip-row span::before { margin-right: 4px; }
+.caiso-tooltip-row strong { font-weight: normal; }
+.caiso-panel .u-cursor-pt { display: none; }

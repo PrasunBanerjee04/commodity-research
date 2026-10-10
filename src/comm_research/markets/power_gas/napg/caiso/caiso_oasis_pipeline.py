@@ -32,6 +32,7 @@ from comm_research.infra.scrapers.caiso.oasis import (
 from comm_research.infra.scrapers.caiso.oasis.models import Report
 from comm_research.infra.tools.caiso_normalizer import DEFAULT_LAKE_ROOT, normalize_csvs
 from comm_research.infra.tools.lake_methods import _clear_raw
+from comm_research.infra.tools.lake_methods.writer_lock import writer_lock
 
 # Running this module with no arguments refreshes every registered report.
 CATEGORIES = tuple(SCRAPERS)
@@ -368,7 +369,7 @@ def run(
         node_list,
     )
 
-    with _run_lock(state):
+    with _run_lock(state), writer_lock(lake):
         # Preserve unknown pre-existing files rather than discard unrecovered data.
         keep = {
             path.absolute()

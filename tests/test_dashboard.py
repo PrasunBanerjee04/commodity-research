@@ -7,6 +7,7 @@ import json
 import tempfile
 import threading
 import unittest
+from concurrent.futures import ThreadPoolExecutor
 from datetime import date, datetime, timedelta, timezone
 from functools import partial
 from http.server import ThreadingHTTPServer
@@ -103,7 +104,7 @@ class LoaderTests(unittest.TestCase):
             metadata = loader.inspect_dataset(dataset)
             self.assertEqual(
                 [signal.label for signal in metadata.signals],
-                ["LMP", "Energy", "Congestion", "Losses", "GHG"],
+                ["LMP", "Energy", "Congestion", "Loss", "GHG"],
             )
             self.assertEqual({signal.unit for signal in metadata.signals}, {"$/MWh"})
             selected = (metadata.signals[0].key, metadata.signals[2].key)
@@ -203,6 +204,127 @@ class LoaderTests(unittest.TestCase):
         self.assertNotEqual(before.files, after.files)
         self.assertEqual((before_result.points, after_result.points), (2, 3))
 
+    def test_changed_queries_and_options_do_not_read_disk_after_open(self):
+        self.write("rtm_lmp", price_data(hours=48, nodes=("SP15", "NP15")))
+        dataset = self.dataset("rtm_lmp")
+        loader.inspect_dataset(dataset)
+        with (
+            patch.object(
+                loader.pl,
+                "scan_parquet",
+                side_effect=AssertionError("Disk scan on interaction"),
+            ),
+            patch.object(
+                loader.pl,
+                "scan_ipc",
+                side_effect=AssertionError("IPC scan on interaction"),
+            ),
+        ):
+            self.assertEqual(
+                loader.dimension_options(dataset, "node"), ("NP15", "SP15")
+            )
+            for day, node, signal in (
+                (1, "SP15", "value:LMP"),
+                (2, "NP15", "value:CONG"),
+            ):
+                bundle = loader.load_series(
+                    dataset,
+                    date(2024, 1, day),
+                    date(2024, 1, day),
+                    "UTC",
+                    (signal,),
+                    (("node", (node,)),),
+                )
+                self.assertEqual(bundle.points, 24)
+            self.assertEqual(
+                loader.load_raw_page(
+                    dataset, date(2024, 1, 2), date(2024, 1, 2), "UTC"
+                ).height,
+                240,
+            )
+
+    def test_concurrent_feed_open_materializes_once(self):
+        self.write("prices", price_data(hours=48))
+        dataset = self.dataset("prices")
+        with (
+            patch.object(loader.pl, "scan_parquet", wraps=pl.scan_parquet) as scan,
+            ThreadPoolExecutor(max_workers=4) as executor,
+        ):
+            snapshots = list(
+                executor.map(lambda _: loader.cached_feed(dataset), range(4))
+            )
+        self.assertEqual(scan.call_count, 1)
+        self.assertTrue(all(item is snapshots[0] for item in snapshots))
+
+    def test_oversize_feed_is_rejected_without_retaining_memory(self):
+        self.write("prices", price_data(hours=48))
+        dataset = self.dataset("prices")
+        with (
+            patch.object(loader, "MEMORY_CACHE_BYTES", 10),
+            self.assertRaisesRegex(loader.LakeError, "memory cache"),
+        ):
+            loader.cached_feed(dataset)
+        self.assertNotIn(dataset, loader._feeds)
+
+    def test_cold_feed_load_does_not_block_warm_snapshot_queries(self):
+        self.write("warm", price_data(hours=48))
+        self.write("cold", price_data(hours=48))
+        warm, cold = self.dataset("warm"), self.dataset("cold")
+        snapshot = loader.cached_feed(warm)
+        entered, release = threading.Event(), threading.Event()
+        original_scan = loader._scan
+
+        def slow_scan(dataset):
+            entered.set()
+            self.assertTrue(release.wait(3))
+            return original_scan(dataset)
+
+        with (
+            patch.object(loader, "_scan", side_effect=slow_scan),
+            ThreadPoolExecutor(max_workers=2) as executor,
+        ):
+            loading = executor.submit(loader.cached_feed, cold)
+            try:
+                self.assertTrue(entered.wait(2))
+                lookup = executor.submit(loader.cached_feed, warm)
+                self.assertIs(lookup.result(timeout=0.5), snapshot)
+            finally:
+                release.set()
+            loading.result(timeout=3)
+
+    def test_adaptive_hourly_and_four_hour_display_keep_native_statistics(self):
+        start = datetime(2024, 1, 1, tzinfo=timezone.utc)
+        ticks = pl.datetime_range(
+            start, start + timedelta(days=90), interval="5m", closed="left", eager=True
+        )
+        table = pl.DataFrame(
+            {
+                "timestamp": ticks,
+                "node": "SP15",
+                "value": [float(i % 100) for i in range(len(ticks))],
+            }
+        ).with_columns(
+            pl.when(pl.int_range(pl.len()) == 20)
+            .then(10_000.0)
+            .otherwise(pl.col("value"))
+            .alias("value")
+        )
+        self.write("rtm_lmp", table)
+        dataset = self.dataset("rtm_lmp")
+        for days, resolution in ((30, "1h"), (90, "4h")):
+            bundle = loader.load_series(
+                dataset,
+                start.date(),
+                (start + timedelta(days=days - 1)).date(),
+                "UTC",
+                ("value",),
+            )
+            self.assertEqual(bundle.resolution, resolution)
+            self.assertLessEqual(bundle.plot.height, 1500)
+            self.assertEqual(bundle.statistics["max"][0], 10_000)
+            self.assertEqual(bundle.statistics["count"][0], days * 288)
+            self.assertLess(bundle.plot["value"].max(), 10_000)
+
     def test_dated_queries_skip_distant_hive_files_but_keep_unpartitioned_files(self):
         self.write("prices", price_data(hours=2))
         distant = self.root / "prices/year=2024/month=01/day=20/data.parquet"
@@ -286,6 +408,7 @@ class LoaderTests(unittest.TestCase):
         with self.assertRaises(loader.LakeError):
             loader.inspect_dataset(dataset)
 
+
 @unittest.skipUnless(HAS_DASHBOARD, "Install .[dashboard] to run dashboard checks")
 class DashboardApiTests(unittest.TestCase):
     def setUp(self):
@@ -293,11 +416,7 @@ class DashboardApiTests(unittest.TestCase):
         self.addCleanup(self.temporary.cleanup)
         self.root = Path(self.temporary.name)
         self.feed = "power_gas/napg/caiso/dam_lmp"
-        path = (
-            self.root
-            / self.feed
-            / "year=2024/month=01/day=01/data.parquet"
-        )
+        path = self.root / self.feed / "year=2024/month=01/day=01/data.parquet"
         path.parent.mkdir(parents=True)
         price_data("mw", hours=48, nodes=("SP15", "NP15")).write_parquet(path)
         loader.clear_caches()
@@ -335,7 +454,9 @@ class DashboardApiTests(unittest.TestCase):
         self.assertIn(b"Commodities Analytics Dashboard", html)
         status, headers, script = self.get("/src/main.js")
         self.assertEqual(status, 200)
-        self.assertEqual(headers["Content-Security-Policy"].split(";")[0], "default-src 'self'")
+        self.assertEqual(
+            headers["Content-Security-Policy"].split(";")[0], "default-src 'self'"
+        )
         self.assertIn(b"DockManager", script)
         self.assertIn("script-src 'self'", headers["Content-Security-Policy"])
         status, _, stylesheet = self.get("/styles/theme.css")
@@ -359,11 +480,36 @@ class DashboardApiTests(unittest.TestCase):
         self.assertEqual(metadata["dataset"]["title"], "CAISO / Day-Ahead LMP")
         self.assertEqual(
             [signal["label"] for signal in metadata["signals"]],
-            ["LMP", "Energy", "Congestion", "Losses", "GHG"],
+            ["LMP", "Energy", "Congestion", "Loss", "GHG"],
         )
         status, _, body = self.get(f"/api/options?key={self.feed}&dimension=node")
         self.assertEqual(status, 200)
         self.assertEqual(json.loads(body)["values"], ["NP15", "SP15"])
+
+    def test_api_never_sends_more_than_1500_points_per_series(self):
+        path = self.root / self.feed / "year=2024/month=01/day=01/data.parquet"
+        price_data("mw", hours=4000, nodes=("SP15", "NP15")).write_parquet(path)
+        loader.clear_caches()
+        status, _, body = self.post(
+            "/api/series",
+            {
+                "key": self.feed,
+                "start": "2024-01-01",
+                "end": "2024-12-31",
+                "signals": ["mw:LMP", "mw:CONG"],
+                "filters": {},
+            },
+        )
+        self.assertEqual(status, 200)
+        result = json.loads(body)
+        counts = {}
+        for row in result["plot"]:
+            counts[row["series"]] = counts.get(row["series"], 0) + 1
+            self.assertIn(row["signal"], ("mw:LMP", "mw:CONG"))
+            self.assertIn(row["dimensions"]["node"], ("NP15", "SP15"))
+        self.assertEqual(len(counts), 4)
+        self.assertLessEqual(max(counts.values()), 1500)
+        self.assertEqual(result["statistics"][0]["count"], 4000)
 
     def test_series_endpoint_returns_metrics_and_rejects_invalid_controls(self):
         request = {
@@ -382,6 +528,9 @@ class DashboardApiTests(unittest.TestCase):
         self.assertEqual(result["observations"], 48)
         self.assertEqual(result["statistics"][0]["series"], "LMP · SP15 · DAM")
         self.assertEqual(result["statistics"][0]["last"], 57)
+        self.assertTrue(result["plot"][0]["timestamp"].endswith("Z"))
+        self.assertEqual(result["plot"][0]["component"], "LMP")
+        self.assertEqual(result["plot"][0]["node"], "SP15")
         request["zone"] = ["not-a-zone"]
         status, _, body = self.post("/api/series", request)
         self.assertEqual(status, 400)

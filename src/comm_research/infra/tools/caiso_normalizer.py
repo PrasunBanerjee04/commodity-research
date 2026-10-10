@@ -13,6 +13,7 @@ from pathlib import Path
 import polars as pl
 
 from comm_research.infra.scrapers.caiso.oasis.models import Report
+from comm_research.infra.tools.caiso_schema import COMPONENT_ALIASES, normalize_schema
 
 PROJECT_ROOT = Path(__file__).resolve().parents[4]
 DEFAULT_LAKE_ROOT = PROJECT_ROOT / "data/lake/power_gas/napg/caiso"
@@ -117,6 +118,15 @@ def read_csv(path: Path | str, *, report: Report | None = None) -> pl.DataFrame:
         pl.col(name).str.to_date(strict=True) for name in dates & set(names)
     )
     frame = frame.with_columns(expressions)
+    if report and report.interval_minutes and "lmp" in report.dataset_name:
+        original_type = frame["lmp_type"] if "lmp_type" in frame.columns else None
+        frame = normalize_schema(
+            frame.lazy(), report.dataset_name, interval_minutes=report.interval_minutes
+        ).collect()
+        if "lmp_type" in frame.columns:
+            frame = frame.with_columns(pl.col("lmp_type").alias("component"))
+        if original_type is not None:
+            frame = frame.with_columns(original_type)
     if not missing and any(frame[name].null_count() for name in _TIMESTAMPS):
         raise ValueError(f"Null interval timestamps in {path}")
     if (
@@ -198,7 +208,27 @@ def normalize_csvs(
                 [pl.read_parquet(target, hive_partitioning=False), clean],
                 how="diagonal_relaxed",
             )
-        clean = clean.unique(maintain_order=True)
+        if (
+            report
+            and report.interval_minutes
+            and {"node", "lmp_type", _TIMESTAMPS[0]} <= set(clean.columns)
+        ):
+            clean = clean.with_columns(
+                pl.col("lmp_type")
+                .cast(pl.String)
+                .str.strip_chars()
+                .str.to_uppercase()
+                .replace(COMPONENT_ALIASES)
+                .alias("component")
+            )
+            keys = [
+                column
+                for column in (_TIMESTAMPS[0], "node", "component", "market_run_id")
+                if column in clean.columns
+            ]
+            clean = clean.unique(subset=keys, keep="last", maintain_order=True)
+        else:
+            clean = clean.unique(maintain_order=True)
         if _TIMESTAMPS[0] in clean.columns:
             clean = clean.sort(_TIMESTAMPS[0])
         _write_atomic(clean, target)
