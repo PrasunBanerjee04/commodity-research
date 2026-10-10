@@ -21,8 +21,8 @@ disk-backed queries. Increase the limit only when the machine has enough RAM.
 The default DuckDB budget is 2GB; JSON responses have a separate 256MiB LRU.
 
 A default-node overview, computed at startup, paints the complete available
-time span immediately. **CACHING EXACT HISTORY** marks this initial sampled view;
-its tooltip explicitly says **OVERVIEW**. The browser then downloads the complete
+time span immediately. Its tooltip explicitly says **OVERVIEW** during this
+initial sampled view. The browser then downloads the complete
 node history once and replaces the overview. Exact timestamps and prices stay
 in typed arrays, while a precomputed min/max hierarchy bounds drawn vertices
 to the pane width and at most 1,500. Hover uses the exact cached ticks after
@@ -58,8 +58,17 @@ mean the complete multi-year history has already downloaded.
 | `mw` | Numeric price, **$/MWh** despite its name; legacy `value` is also supported |
 | `market_run_id` | `DAM` day-ahead / `RTM` real-time market |
 
-These four components use blue `#2962FF`, green `#089981`, dashed red `#F23645`,
-and amber `#FF9800`, respectively. LMP strokes are 2px; other strokes are 1.5px.
+These four components use blue `#2962FF`, muted teal `#00897B`, dashed crimson
+`#E53935`, and amber `#FB8C00`, respectively. LMP strokes are 1.75px; other
+strokes are 1.25px. Generic feeds with GHG use violet `#8E24AA`.
+
+Component badges and the docked sub-header legend use square or dashed keys;
+muted keys indicate hidden traces. Flat range controls retain local filtering.
+The `⤢` icon beside the node selector pops out the existing pane without
+cloning its tab or reloading its history; allow browser popups to use it.
+Closing the window returns the pane to the workspace. UTC tick labels,
+a separated right-hand price ruler, and dashed crosshairs with axis pills
+replace the old timestamp counters and metric strips.
 Missing/nonfinite prices remain **null**, not fabricated zeros. Repeated
 timestamp/node/component observations use the first price; this does not
 establish the latest published revision when sources lack revision timestamps.

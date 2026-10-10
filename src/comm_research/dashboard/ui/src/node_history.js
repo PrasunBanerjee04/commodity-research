@@ -1,17 +1,14 @@
+import { METRIC_TOKENS } from "./chart_chrome.js";
 import { request } from "./http.js";
 
 export const COMPONENTS = [
-  { key: "lmp", label: "LMP", color: "#2962FF", width: 2 },
-  { key: "energy", label: "Energy", color: "#089981", width: 1.5 },
-  {
-    key: "congestion",
-    label: "Congestion",
-    color: "#F23645",
-    width: 1.5,
-    dash: [6, 4],
-  },
-  { key: "loss", label: "Loss", color: "#FF9800", width: 1.5 },
-];
+  ["lmp", "LMP", "LMP"],
+  ["energy", "Energy", "ENERGY"],
+  ["congestion", "Congestion", "CONG"],
+  ["loss", "Loss", "LOSS"],
+].map(([key, label, metric]) => ({
+  key, label, color: METRIC_TOKENS[metric].stroke, ...METRIC_TOKENS[metric],
+}));
 const histories = new Map();
 const nodeLists = new Map();
 

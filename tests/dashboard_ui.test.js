@@ -89,12 +89,18 @@ test('display statistics use actual timestamps and sample standard deviation', (
   assert.equal(stats.change_24h,50); assert.equal(stats.mean,-7.5);
   assert.equal(stats.std,Math.sqrt(12.5));
 });
-test('node hue is stable across components and congestion is dashed', () => {
-  const rows = ['LMP','ENERGY','CONG','LOSS'].map(component => ({ node:'TH_NP15_GEN-APND', component, series: component }));
-  const styles = rows.map(traceStyle);
-  assert.equal(new Set(styles.map(style => style.stroke.slice(0,7))).size, 1);
-  assert.equal(styles[0].stroke.slice(0,7), '#2962FF'); assert.deepEqual(styles[2].dash, [6,4]);
-  assert.equal(traceStyle({ node:'TH_SP15_GEN-APND', component:'LMP' }).stroke.slice(0,7), '#089981');
+test('metric hues and widths stay consistent across nodes, with a congestion stroke key', () => {
+  const components = ['LMP','ENERGY','CONG','LOSS','GHG'];
+  const expected = ['#2962FF','#00897B','#E53935','#FB8C00','#8E24AA'];
+  for (const node of ['TH_NP15_GEN-APND','TH_SP15_GEN-APND']) {
+    const styles = components.map(component => traceStyle({node,component}));
+    assert.deepEqual(styles.map(style=>style.stroke),expected);
+    assert.deepEqual(styles.map(style=>style.width),[1.75,1.25,1.25,1.25,1.25]);
+    assert.deepEqual(styles[2].dash,[6,4]);
+    assert.deepEqual(styles[3].dash,[]);
+  }
+  assert.equal(traceStyle({component:'MCE'}).stroke,'#00897B');
+  assert.equal(traceStyle({component:'MGHG'}).stroke,'#8E24AA');
 });
 
 test('HTTP status survives an HTML error response', async () => {
@@ -137,7 +143,7 @@ test('complete CAISO history retains exact prices while bounding every local dis
   }
   assert.ok(displayData(history,history.epochs[0],history.epochs.at(-1))[3].includes(12345));
   assert.ok(displayData(history,history.epochs[0],history.epochs.at(-1),320)[0].length<=320);
-  assert.deepEqual(COMPONENTS.map(component=>component.color),['#2962FF','#089981','#F23645','#FF9800']);
+  assert.deepEqual(COMPONENTS.map(component=>component.color),['#2962FF','#00897B','#E53935','#FB8C00']);
 });
 test('malformed complete history cannot poison local canvas sampling', () => {
   assert.throws(()=>prepareHistory({timestamps:['bad'],lmp:[1],energy:[1],congestion:[1],loss:[1]}));

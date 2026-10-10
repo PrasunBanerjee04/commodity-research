@@ -88,16 +88,42 @@ export class LineRenderer {
     });
     gl.uniform2f(this.viewport, width, height);
     gl.lineWidth(Math.min(ratio, this.lineWidthLimit));
-    gl.enable(gl.BLEND);
-    gl.blendFuncSeparate(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA, gl.ONE, gl.ONE_MINUS_SRC_ALPHA);
-    const required = plot.series.reduce((size, series, index) => size + (index && series.show
-      ? Math.max(0, plot.data[index].reduce((n, value) => n + (value != null), 0) - 1) * (this.thick ? 54 : 18) : 0), 0);
-    if (required > this.vertices.length) this.vertices = new Float32Array(2 ** Math.ceil(Math.log2(required)));
-    let offset = 0;
-    const singlePoints = [];
+    // Terminal metric tokens are opaque. Blending those strokes needlessly
+    // adds a compositing pass on software GPUs; retain it for translucent feeds.
+    const opaque = plot.series.every((series, index) => !index || !series.show
+      || (series.alpha === 1 && series.stroke(plot, index).length === 7));
+    if (opaque) gl.disable(gl.BLEND);
+    else {
+      gl.enable(gl.BLEND);
+      gl.blendFuncSeparate(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA, gl.ONE, gl.ONE_MINUS_SRC_ALPHA);
+    }
+    // Multiple nodes can have an identical, opaque component trace. Drawing
+    // it repeatedly has the same pixels, so share its geometry without changing
+    // legend entries, cursor data, or independent visibility state.
+    const visible = [], strokes = new Map();
     for (let index = 1; index < plot.series.length; index++) {
       const series = plot.series[index];
       if (!series.show) continue;
+      const stroke = series.stroke(plot, index);
+      const key = [stroke, series.width, series.dash, series.scale, series.spanGaps].join("|");
+      const peers = strokes.get(key) || [];
+      const values = plot.data[index];
+      const duplicate = series.alpha === 1 && stroke.length === 7 && peers.some(peer =>
+        values.every((value, position) => Object.is(value, plot.data[peer][position])));
+      if (duplicate) continue;
+      visible.push(index);
+      if (series.alpha === 1 && stroke.length === 7) {
+        peers.push(index); strokes.set(key, peers);
+      }
+    }
+    const required = visible.reduce((size, index) => size
+      + Math.max(0, plot.data[index].reduce((n, value) => n + (value != null), 0) - 1)
+        * (this.thick ? 54 : 18), 0);
+    if (required > this.vertices.length) this.vertices = new Float32Array(2 ** Math.ceil(Math.log2(required)));
+    let offset = 0;
+    const singlePoints = [];
+    for (const index of visible) {
+      const series = plot.series[index];
       const times = plot.data[0], values = plot.data[index];
       // The aligned table may contain gaps from other traces; each trace still
       // has <=1,500 observations, so at most 1,499 line segments are emitted.
@@ -123,7 +149,7 @@ export class LineRenderer {
           const dx = x - previous.x, dy = y - previous.y, length = Math.hypot(dx, dy);
           if (length) {
             if (this.thick) {
-              // Explicit quads honor 1.5px/2px widths even where WebGL's
+              // Explicit quads honor fractional CSS stroke widths even where WebGL's
               // native line-width range only supports a one-pixel hairline.
               const half = series.width * ratio / 2;
               const nx = -dy / length * half, ny = dx / length * half;

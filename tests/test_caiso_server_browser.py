@@ -132,7 +132,7 @@ class CaisoServerBrowserTests(unittest.TestCase):
             "document.querySelectorAll('.caiso-chart canvas').length===2"
         )
         self.page.wait_for_function(
-            "[...document.querySelectorAll('.caiso-resolution')].every(el=>el.textContent.includes('EXACT TIMESTAMPS'))"
+            "[...document.querySelectorAll('.caiso-panel')].length===2 && [...document.querySelectorAll('.caiso-panel')].every(el=>el.dataset.activeNode)"
         )
 
     def test_real_http_complete_pivot_aliases_and_missing_node(self):
@@ -145,6 +145,101 @@ class CaisoServerBrowserTests(unittest.TestCase):
         with self.assertRaises(HTTPError) as error:
             urlopen(self.url + "/api/data?feed=unknown")
         self.assertEqual(error.exception.code, 400)
+
+    def test_terminal_chrome_is_docked_and_badges_have_no_checkmarks(self):
+        self.open()
+        self.assertEqual(
+            self.page.locator(
+                ".caiso-resolution, .chart-resolution, .panel-metrics, input[type=checkbox]"
+            ).count(),
+            0,
+        )
+        self.assertNotIn("✓", self.page.locator("body").inner_text())
+        panels = self.page.locator(".caiso-panel")
+        for index in range(2):
+            panel = panels.nth(index)
+            legend = panel.locator(".caiso-legend").bounding_box()
+            viewport = panel.locator(".chart-viewport").bounding_box()
+            self.assertLessEqual(legend["y"] + legend["height"], viewport["y"])
+            icon = panel.get_by_role("button", name="Pop out node chart")
+            self.assertEqual(icon.inner_text(), "⤢")
+            self.assertEqual(icon.bounding_box()["width"], 18)
+            self.assertEqual(icon.bounding_box()["height"], 18)
+            self.assertTrue(
+                icon.evaluate("el=>el.previousElementSibling.matches('.caiso-node')")
+            )
+            active = panel.locator('[data-range="ALL"]')
+            self.assertEqual(
+                active.evaluate("el=>getComputedStyle(el).backgroundColor"),
+                "rgb(42, 46, 57)",
+            )
+            self.assertEqual(
+                active.evaluate("el=>getComputedStyle(el).borderBottomColor"),
+                "rgb(41, 98, 255)",
+            )
+            badge = panel.get_by_role("checkbox", name="Energy", exact=True)
+            marker = badge.evaluate(
+                "el=>{const s=getComputedStyle(el,'::before');return [s.width,s.height,s.backgroundColor,s.content]}"
+            )
+            self.assertEqual(marker, ["6px", "6px", "rgb(0, 137, 123)", '""'])
+            badge.click()
+            self.assertEqual(
+                badge.evaluate("el=>getComputedStyle(el).color"), "rgb(67, 70, 81)"
+            )
+            self.assertEqual(
+                badge.evaluate("el=>getComputedStyle(el,'::before').backgroundColor"),
+                "rgb(67, 70, 81)",
+            )
+            badge.click()
+        row_heights = self.page.locator(".tree-leaf").evaluate_all(
+            "els=>els.map(el=>el.getBoundingClientRect().height)"
+        )
+        self.assertTrue(all(height == 20 for height in row_heights), row_heights)
+        over = panels.first.locator(".u-over").bounding_box()
+        self.page.mouse.move(
+            over["x"] + over["width"] / 2, over["y"] + over["height"] / 2
+        )
+        self.assertTrue(panels.first.locator(".axis-pill-x").is_visible())
+        self.assertTrue(panels.first.locator(".axis-pill-y").is_visible())
+        self.assertRegex(
+            panels.first.locator(".axis-pill-x").inner_text(), r"\d\d-\d\d \d\d:\d\d"
+        )
+        self.assertEqual(
+            panels.first.locator(".u-cursor-x").evaluate(
+                "el=>getComputedStyle(el).borderLeftColor"
+            ),
+            "rgb(67, 70, 81)",
+        )
+
+    def test_popout_reuses_existing_panel_and_returns_without_fetching(self):
+        self.open()
+        before = len(self.requests)
+        with self.page.expect_popup() as popup_info:
+            self.page.locator(".caiso-panel").first.get_by_role(
+                "button", name="Pop out node chart"
+            ).click()
+        popup = popup_info.value
+        errors = []
+        popup.on("pageerror", lambda error: errors.append(str(error)))
+        popup.wait_for_selector(".caiso-chart canvas")
+        popup.wait_for_function(
+            "document.querySelector('.caiso-chart').clientHeight>250"
+        )
+        self.assertEqual(popup.locator(".caiso-panel").count(), 1)
+        popup.get_by_role("checkbox", name="Energy", exact=True).click()
+        self.assertEqual(
+            popup.get_by_role("checkbox", name="Energy", exact=True).get_attribute(
+                "aria-checked"
+            ),
+            "false",
+        )
+        popup.close()
+        self.page.wait_for_function(
+            "document.querySelectorAll('.caiso-panel').length===2"
+        )
+        self.assertEqual(self.page.locator(".dv-tab").count(), 2)
+        self.assertEqual(len(self.requests), before)
+        self.assertEqual(errors, [])
 
     def test_both_panes_mount_and_utc_exact_tooltip(self):
         self.open()
@@ -183,7 +278,7 @@ class CaisoServerBrowserTests(unittest.TestCase):
         )
         pixels = self.page.locator(".caiso-chart canvas").evaluate_all("""els=>els.map(canvas=>{
           const pixels=canvas.getContext('2d').getImageData(0,0,canvas.width,canvas.height).data;
-          const colors=[[41,98,255],[8,153,129],[242,54,69],[255,152,0]],counts=[0,0,0,0];
+          const colors=[[41,98,255],[0,137,123],[229,57,53],[251,140,0]],counts=[0,0,0,0];
           for(let i=0;i<pixels.length;i+=4) for(let c=0;c<colors.length;c++)
             if(colors[c].every((value,k)=>pixels[i+k]===value)) counts[c]++;
           return counts;

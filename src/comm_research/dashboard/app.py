@@ -62,6 +62,8 @@ class DashboardHandler(BaseHTTPRequestHandler, LakeAPI):
                 )
             elif request.path == "/":
                 self._asset("index.html", "text/html; charset=utf-8")
+            elif request.path == "/popout.html":
+                self._asset("popout.html", "text/html; charset=utf-8")
             elif request.path.startswith(("/vendor/", "/styles/", "/src/")):
                 self._static_asset(request.path)
             else:

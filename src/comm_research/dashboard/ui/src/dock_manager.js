@@ -41,6 +41,12 @@ export class DockManager {
           init: ({ params }) => {
             const key = canonicalDatasetPath(params.dataset.key);
             const dataset = { ...params.dataset, ...this.datasets.find(item => item.key === key), key };
+            element.addEventListener("panel-popout-request", () => {
+              const panel = this.openPanels.get(key);
+              if (panel) void this.view.addPopoutGroup(panel).then(opened => {
+                if (!opened) this.onError(new Error("Popout window could not be opened. Allow popups for this workstation."));
+              }).catch(this.onError);
+            });
             const Controller = dataset.transport === "node-history" ? CaisoPanel : ChartPanel;
             chartPanel = new Controller(dataset, element, this.onError, params.settingsKey || id);
             if (!this.chartPanels.has(dataset.key)) this.chartPanels.set(dataset.key, chartPanel);

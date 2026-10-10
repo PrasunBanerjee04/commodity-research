@@ -480,6 +480,10 @@ def create_app(
         app.mount("/" + folder, StaticFiles(directory=WEB_ROOT / folder), name=folder)
     static_root = PROJECT_ROOT / "static"
 
+    @app.get("/popout.html")
+    def popout():
+        return FileResponse(WEB_ROOT / "popout.html")
+
     @app.get("/")
     def index():
         return FileResponse(static_root / "index.html")

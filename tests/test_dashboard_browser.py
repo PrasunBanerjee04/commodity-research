@@ -286,6 +286,7 @@ class DashboardBrowserTests(unittest.TestCase):
             ),
             "false",
         )
+
         self.assertFalse(any("/api/series" in url for url in requests))
         self.page.reload(wait_until="networkidle")
         self.assert_canvases(2)
@@ -296,6 +297,108 @@ class DashboardBrowserTests(unittest.TestCase):
             ),
             "false",
         )
+
+    def test_generic_terminal_chrome_and_popout(self):
+        self.open()
+        self.assert_canvases(2)
+        self.assertEqual(
+            self.page.locator(
+                ".chart-resolution, .panel-metrics, input[type=checkbox]"
+            ).count(),
+            0,
+        )
+        self.assertNotIn("✓", self.page.locator("body").inner_text())
+        panel = self.page.locator(".market-panel").first
+        legend = panel.locator(".chart-legend").bounding_box()
+        viewport = panel.locator(".chart-viewport").bounding_box()
+        self.assertLessEqual(legend["y"] + legend["height"], viewport["y"])
+        badge = panel.get_by_role("checkbox", name="LMP", exact=True)
+        self.assertEqual(
+            badge.locator(".choice-marker").evaluate(
+                "el=>[el.clientWidth,el.clientHeight,getComputedStyle(el).backgroundColor]"
+            ),
+            [6, 6, "rgb(41, 98, 255)"],
+        )
+        before = []
+        self.page.on(
+            "request",
+            lambda request: (
+                before.append(request.url) if "/api/" in request.url else None
+            ),
+        )
+        with self.page.expect_popup() as popup_info:
+            panel.get_by_role("button", name="Pop out node chart").click()
+        popup = popup_info.value
+        popup.wait_for_selector(".market-panel canvas")
+        self.assertEqual(popup.locator(".market-panel").count(), 1)
+        popup.close()
+        self.page.wait_for_function(
+            "() => document.querySelectorAll('.market-panel').length===2"
+        )
+        self.assertEqual(before, [])
+
+    def test_available_ghg_uses_inline_violet_badge_and_trace(self):
+        path = (
+            Path(self.temporary.name)
+            / "power_gas/napg/caiso/dam_lmp/year=2023/month=07/day=08/data.parquet"
+        )
+        original = path.read_bytes()
+        frame = pl.read_parquet(path)
+        ghg = frame.filter(pl.col("lmp_type") == "LMP").with_columns(
+            pl.lit("MGHG").alias("lmp_type"), (pl.col("mw") / 10 - 5).alias("mw")
+        )
+        pl.concat([frame, ghg]).write_parquet(path)
+        clear_caches()
+        try:
+            self.page.add_init_script("""document.addEventListener('DOMContentLoaded',()=>{
+              const Engine=window.uPlot;
+              window.chromePlots=[];
+              window.uPlot=class extends Engine {
+                constructor(...args){super(...args);window.chromePlots.push(this)}
+              };
+            });""")
+            self.open()
+            self.assert_canvases(2)
+            panel = self.page.get_by_role("tabpanel", name="CAISO: Day-Ahead LMP")
+            badge = panel.locator('.component-ribbon [data-component="GHG"]')
+            self.assertEqual(badge.count(), 1)
+            self.assertEqual(
+                badge.evaluate("el=>getComputedStyle(el).color"), "rgb(67, 70, 81)"
+            )
+            badge.click()
+            legend = panel.locator('.chart-legend [data-component="GHG"]')
+            legend.wait_for()
+            self.assertEqual(
+                badge.locator(".choice-marker").evaluate(
+                    "el=>getComputedStyle(el).backgroundColor"
+                ),
+                "rgb(142, 36, 170)",
+            )
+            self.assertEqual(
+                legend.evaluate("el=>getComputedStyle(el,'::before').backgroundColor"),
+                "rgb(142, 36, 170)",
+            )
+            rulers = panel.evaluate("""el=>{
+              const plot=window.chromePlots.find(plot=>el.contains(plot.root));
+              const {bbox,ctx}=plot, ratio=ctx.canvas.width/plot.width;
+              const zero=Math.floor(Math.round(plot.valToPos(0,'y',true))+ratio/2);
+              const right=Math.floor(Math.round(bbox.left+bbox.width)+ratio/2);
+              const count=(x,y,width,height,color)=>{
+                const data=ctx.getImageData(x,y,width,height).data;let result=0;
+                for(let i=0;i<data.length;i+=4)
+                  if(color.every((channel,k)=>data[i+k]===channel))result++;
+                return result;
+              };
+              return {
+                zero:count(Math.ceil(bbox.left),zero,Math.floor(bbox.width),1,[54,58,69]),
+                border:count(right,Math.ceil(bbox.top),1,Math.floor(bbox.height),[42,46,57]),
+              };
+            }""")
+            self.assertGreater(rulers["zero"], 10)
+            self.assertGreater(rulers["border"], 10)
+        finally:
+            path.write_bytes(original)
+            clear_caches()
 
     def test_http_json_failure_is_visible_and_update_recovers(self):
         self.page.route(

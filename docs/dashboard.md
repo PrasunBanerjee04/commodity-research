@@ -31,7 +31,7 @@ are saved locally in the browser; source rows are not stored there. The **DATA**
 button collapses the navigator.
 
 Each panel has its own date range, signal selection, node/dimension filters,
-metrics, and uPlot chart. The node picker supports multiple selections and defaults to the first available
+a docked legend, and uPlot chart. The node picker supports multiple selections and defaults to the first available
 node. Empty default horizons reanchor to that selected series' latest data. **UPDATE**
 refreshes that panel. The
 **LIGHT**/**DARK** control switches the workstation palette; charts redraw with
@@ -66,11 +66,12 @@ when the source lacks revision timestamps. Hourly/daily frequency aggregates UTC
 bins; Native preserves source timestamps. Node, resource, product and other
 series filters apply before aggregation. An empty selection returns no rows.
 
-The metric strip summarizes the first returned trace: last, 24h change, minimum,
-maximum, period mean, and sample standard deviation (one observation displays
-`—`). 24h change requires an observation exactly 24 hours before the last point:
-`(last - reference) / abs(reference) × 100`. A missing or zero reference displays
-`—`; shorter samples are not presented as daily changes.
+Component controls use 6px square keys, with a dashed congestion key and
+muted inactive states. Legends sit in a sub-header outside the plot. The `⤢`
+icon beside the node picker pops out the existing pane; closing that window
+returns it to the workspace. Range buttons use a flat segmented control,
+including YTD. Chart axes use UTC `MM-DD HH:mm` ticks and a separated right-hand
+price ruler. Metric and resolution strips are omitted from the chart chrome.
 
 Every API plot is capped at 1,500 points per trace. Native sub-hourly windows
 longer than seven days use hourly means, or four-hour means for windows of 60
@@ -135,14 +136,15 @@ API emits the unified UTC `timestamp` in ISO-8601 form ending in `Z`.
 
 `LMP_TYPE`, `XML_DATA`, `XML_DATA_ITEM`, and wide price fields map to `LMP`,
 `ENERGY`, `CONG`, `LOSS` (and optional `GHG`). Legacy MCE/MCC/MCL signal settings
-are migrated. **LMP / Energy / Congestion / Loss** checkboxes and the searchable
+are migrated. **LMP / Energy / Congestion / Loss / GHG** scientific badges and the searchable
 **NODES** dropdown on each ribbon update its series immediately. All unique
 PNodes are searchable; large dropdowns render only 200 matches at a time. Select
 up to eight nodes. A new panel initially displays the first node; its browser
 cache loads the available components and nodes for that date window in batches.
 
-Nodes retain stable hues across components: NP15 blue, SP15 green, ZP26 amber;
-congestion is dashed and losses dotted. Click the legend at the top right to
+Component colors are consistent across nodes: LMP royal blue, Energy muted
+teal, Congestion dashed crimson, Loss amber, and GHG violet. Click the docked
+sub-header legend to
 hide/show a trace instantly, with no server request. Visibility survives theme
 changes and reloads. Selecting no nodes/components intentionally clears the chart.
 
@@ -183,9 +185,9 @@ operations are outside the warm interaction latency target. **Rescan** refreshes
 open feeds, metadata, and both cache layers after ingestion.
 
 uPlot maintains the axes, scales, and cursor. Price lines use a single batched
-WebGL draw, preserving node hues, component opacity, dashes, and every returned
-point. Native GPU hairlines prioritize fast comparisons; some drivers limit
-their width to one physical pixel. WebGL resources are reused and released when
+WebGL draw, using consistent metric colors, fractional stroke widths, and a
+dashed congestion trace. Opaque metric strokes avoid an extra blend pass.
+WebGL resources are reused and released when
 a chart closes. If WebGL is unavailable or loses its context, short Canvas
 strokes keep the chart visible; that fallback has no 50ms latency guarantee.
 Split presets move the existing panels rather than recreating canvases.
@@ -193,10 +195,8 @@ Split presets move the existing panels rather than recreating canvases.
 The narrowest cached window containing the selected dates supplies the view.
 For example, 1D/5D sliced from a cached 30-day RTM window retains its hourly
 means; it does not reconstruct native five-minute ticks from sampled data.
-The chart badge identifies the resolution and statistics basis. **Source stats**
-use exact source intervals when the entire cached window is selected;
-**Display stats** use the displayed cached samples when slicing a smaller window.
-The strip's tooltip explains this distinction.
+API statistics still distinguish source intervals from display samples; the
+terminal chrome does not show debug counters or an auxiliary metric strip.
 
 The server retains up to eight feed snapshots within 512 MiB of source data and
 rejects individual feeds over that limit or five million rows. Browser caches

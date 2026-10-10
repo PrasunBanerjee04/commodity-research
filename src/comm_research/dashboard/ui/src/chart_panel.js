@@ -2,28 +2,15 @@ import { loadMetadata, loadOptions, loadSeries } from "./api.js";
 import { feedCache } from "./query_cache.js";
 import { emptyPaths } from "./canvas_paths.js";
 import { LineRenderer } from "./line_renderer.js";
+import { METRIC_TOKENS, utcTicks, drawRulers, updateAxisPills, popoutButton } from "./chart_chrome.js";
 
-const NODE_COLORS = ["#2962FF", "#089981", "#D18B35", "#8191A8", "#F23645"];
 const COMPONENT_ALIASES = { MCE: "ENERGY", MCC: "CONG", MCL: "LOSS", MGHG: "GHG" };
 
 export function traceStyle(row) {
-  const node = row.node || row.series.split(" · ")[1] || row.series;
-  let hash = 0;
-  for (const char of node) hash = (Math.imul(hash, 31) + char.charCodeAt(0)) >>> 0;
-  const base = node.includes("NP15") ? NODE_COLORS[0] : node.includes("SP15") ? NODE_COLORS[1] : node.includes("ZP26") ? NODE_COLORS[2] : NODE_COLORS[hash % NODE_COLORS.length];
-  const component = row.component || "LMP";
-  const alpha = { LMP: "FF", ENERGY: "AA", CONG: "DD", LOSS: "88", GHG: "66" }[component] || "FF";
-  return { stroke: `${base}${alpha}`, dash: component === "CONG" ? [6, 4] : component === "LOSS" ? [2, 3] : [], width: component === "LMP" ? 1.6 : 1.2 };
+  const component = COMPONENT_ALIASES[row.component] || row.component || "LMP";
+  return METRIC_TOKENS[component] || METRIC_TOKENS.LMP;
 }
-const DATE_RANGES = ["1D", "5D", "1M", "1Y", "ALL"];
-const METRICS = [
-  ["LAST", "last"],
-  ["CHG", "change_24h"],
-  ["MIN", "min"],
-  ["MAX", "max"],
-  ["MEAN", "mean"],
-  ["STD", "std"],
-];
+const DATE_RANGES = ["1D", "5D", "1M", "YTD", "ALL"];
 
 function escapeHtml(value) {
   return String(value).replace(/[&<>"']/g, (char) => ({
@@ -35,20 +22,12 @@ function escapeHtml(value) {
   })[char]);
 }
 
-function formatNumber(value, percent = false) {
-  if (value === null || value === undefined || !Number.isFinite(Number(value))) return "—";
-  const formatted = Number(value).toLocaleString(undefined, {
-    maximumFractionDigits: 2,
-    minimumFractionDigits: 2,
-  });
-  return percent ? `${formatted}%` : formatted;
-}
-
 function utcDate(date) {
   return date.toISOString().slice(0, 10);
 }
 
 function dateBefore(date, range) {
+  if (range === "YTD") return `${date.slice(0, 4)}-01-01`;
   const next = new Date(`${date}T00:00:00Z`);
   const days = { "1D": 0, "5D": 4, "1M": 29, "1Y": 364 }[range] || 0;
   next.setUTCDate(next.getUTCDate() - days);
@@ -134,11 +113,11 @@ export class ChartPanel {
         <div class="dimension-controls"></div>
         <button class="panel-update" type="button">UPDATE</button>
       </div>
-      <div class="panel-metrics" aria-label="Market metrics"></div>
+      <div class="panel-subheader">
+        <div class="chart-legend" role="group" aria-label="Chart legend"></div>
+      </div>
       <section class="panel-chart chart-viewport" aria-label="Chart viewport">
         <div class="chart-mount"></div>
-        <div class="chart-legend" role="group" aria-label="Chart legend"></div>
-        <div class="chart-resolution"></div>
         <div class="chart-empty" role="status">LOADING_DATA…</div>
       </section>
       <div class="panel-error" role="status"></div>
@@ -146,14 +125,12 @@ export class ChartPanel {
     this.mount = this.container.querySelector(".chart-mount");
     this.empty = this.container.querySelector(".chart-empty");
     this.error = this.container.querySelector(".panel-error");
-    this.metrics = this.container.querySelector(".panel-metrics");
     this.startInput = this.container.querySelector('[data-date="start"]');
     this.endInput = this.container.querySelector('[data-date="end"]');
     this.signalLabel = this.container.querySelector("[data-signal-label]");
     this.signalOptions = this.container.querySelector("[data-signal-options]");
     this.componentRibbon = this.container.querySelector(".component-ribbon");
     this.legend = this.container.querySelector(".chart-legend");
-    this.resolutionLabel = this.container.querySelector(".chart-resolution");
     this.dimensionControls = this.container.querySelector(".dimension-controls");
     this.container.addEventListener("toggle", () => this.positionPickers(), true);
     this.container.querySelector(".panel-toolbar").addEventListener("scroll", () => this.positionPickers());
@@ -272,7 +249,9 @@ export class ChartPanel {
     for (const signal of this.signals) {
       const checkbox = choiceButton(signal.key, signal.label, this.settings.signals.includes(signal.key));
       checkbox.dataset.signalKey = signal.key;
-      if (["LMP", "ENERGY", "CONG", "LOSS"].includes(signal.component)) this.componentRibbon.append(checkbox);
+      checkbox.dataset.component = signal.component || "LMP";
+      checkbox.style.setProperty("--trace-color", traceStyle(signal).stroke);
+      if (["LMP", "ENERGY", "CONG", "LOSS", "GHG"].includes(signal.component)) this.componentRibbon.append(checkbox);
       else this.signalOptions.append(checkbox);
     }
     this.updateSignalLabel();
@@ -318,7 +297,7 @@ export class ChartPanel {
           }
         };
         search.addEventListener("input", render); render(); options.append(search, list);
-        picker.append(summary, options); fragments.push(picker); continue;
+        picker.append(summary, options); fragments.push(picker, popoutButton(this.container)); continue;
       }
       const select = document.createElement("select");
       select.className = "panel-control";
@@ -441,11 +420,6 @@ export class ChartPanel {
           this.error.textContent = "Default horizon was empty; showing the latest available selected series.";
         }
       }
-      this.renderMetrics(result.statistics || []);
-      this.metrics.title = result.statisticsMode === "source" ? "Statistics from all source intervals in this window"
-        : "Statistics from displayed cached samples; use a narrower uncached window for native resolution";
-      this.mount.dataset.resolution = result.resolution;
-      this.resolutionLabel.textContent = `${result.resolution === "native" ? (result.downsampled ? "Native sample" : "Native") : result.resolution + " mean"} · ${result.statisticsMode === "source" ? "Source stats" : "Display stats"}`;
       this.pendingView = { points: result.plot.length, resolution: result.resolution };
       this.renderChart(result.plot || []);
       this.settings = {
@@ -518,26 +492,6 @@ export class ChartPanel {
     } catch (error) { if (!this.disposed) this.showError(error); }
   }
 
-  renderMetrics(statistics) {
-    const summary = statistics[0];
-    if (!summary) {
-      this.metrics.replaceChildren();
-      return;
-    }
-    this.metrics.replaceChildren(...METRICS.map(([label, key]) => {
-      const cell = document.createElement("div");
-      cell.className = "metric-cell";
-      const name = document.createElement("span");
-      name.textContent = `${label}:`;
-      const value = document.createElement("strong");
-      value.textContent = formatNumber(summary[key], key === "change_24h");
-      if (key === "change_24h" && Number(summary[key]) > 0) value.classList.add("positive");
-      if (key === "change_24h" && Number(summary[key]) < 0) value.classList.add("negative");
-      cell.append(name, value);
-      return cell;
-    }));
-  }
-
   renderChart(rows) {
     try {
       this.drawChart(rows);
@@ -605,13 +559,14 @@ export class ChartPanel {
       const rootStyles = getComputedStyle(document.body);
       const text = rootStyles.getPropertyValue("--text-muted").trim();
       const grid = rootStyles.getPropertyValue("--grid-line").trim();
-      const renderer = new LineRenderer();
+      const renderer = new LineRenderer({ thick: true });
       this.chart = new window.uPlot({
         width,
         height,
-        padding: [0, 40, 18, 0],
+        padding: [4, 8, 0, 8],
+        tzDate: timestamp => window.uPlot.tzDate(new Date(timestamp * 1000), "Etc/UTC"),
         scales: { x: { time: true } },
-        hooks: { draw: [plot => renderer.draw(plot), () => this.viewRendered()], destroy: [() => renderer.dispose()] },
+        hooks: { draw: [plot => { renderer.draw(plot); drawRulers(plot); }, () => this.viewRendered()], setCursor: [updateAxisPills], destroy: [() => renderer.dispose()] },
         series: [
           { value: (_plot, timestamp) => timestamp == null ? "" : new Date(timestamp * 1000).toISOString() },
           ...definitions,
@@ -619,17 +574,22 @@ export class ChartPanel {
         axes: [
           {
             stroke: text,
-            grid: { stroke: grid, width: 1 },
+            space: 90,
+            values: utcTicks,
+            grid: { stroke: grid, width: 1, dash: [3, 3] },
             ticks: { stroke: grid, width: 1 },
             font: "10px Consolas, monospace",
           },
           {
             side: 1,
+            align: 2,
+            alignTo: 2,
+            size: 60,
             stroke: text,
-            grid: { stroke: grid, width: 1 },
+            grid: { stroke: grid, width: 1, dash: [3, 3] },
             ticks: { stroke: grid, width: 1 },
             font: "10px Consolas, monospace",
-            values: (_plot, values) => values.map((value) => Number(value).toLocaleString(undefined, { maximumFractionDigits: 2 })),
+            values: (_plot, values) => values.map(value => Number(value).toFixed(2)),
           },
         ],
         cursor: {
@@ -649,6 +609,7 @@ export class ChartPanel {
       const button = document.createElement("button");
       button.type = "button"; button.textContent = label; button.title = label;
       button.style.setProperty("--trace-color", traceStyle(firstRows.get(label)).stroke);
+      button.dataset.component = firstRows.get(label).component || "LMP";
       button.setAttribute("aria-pressed", String(!this.hiddenSeries.has(label)));
       button.addEventListener("click", () => {
         const show = this.hiddenSeries.has(label);
@@ -700,7 +661,6 @@ export class ChartPanel {
     this.pendingView = null;
     this.destroyChart();
     this.legend.replaceChildren();
-    this.metrics.replaceChildren();
     this.showState(error.message.startsWith("ERR_DEPENDENCY_LOAD_FAILED") ? error.message : `${code}: ${error.message}`, true);
     this.error.textContent = error.message;
     this.onError?.(error);

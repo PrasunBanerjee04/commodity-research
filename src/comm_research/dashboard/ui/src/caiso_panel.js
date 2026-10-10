@@ -8,6 +8,7 @@ import {
 } from "./node_history.js";
 import { emptyPaths, drawBoundedSeries } from "./canvas_paths.js";
 import { LineRenderer } from "./line_renderer.js";
+import { drawRulers, updateAxisPills, popoutButton, utcTicks } from "./chart_chrome.js";
 
 function el(tag, className, text) {
   const node = document.createElement(tag);
@@ -52,10 +53,11 @@ export class CaisoPanel {
     this.nodeSelect.addEventListener("change", () => {
       void this.selectNode(this.nodeSelect.value);
     });
-    this.ribbon.append(this.nodeSelect);
+    this.ribbon.append(this.nodeSelect, popoutButton(this.element));
     this.componentButtons = COMPONENTS.map((component, index) => {
       const button = el("button", "caiso-component", component.label);
       button.type = "button";
+      button.dataset.component = component.key;
       button.setAttribute("role", "checkbox");
       button.style.setProperty("--trace-color", component.color);
       button.addEventListener("click", () => this.toggle(index));
@@ -76,15 +78,16 @@ export class CaisoPanel {
     this.legend = el("div", "caiso-legend");
     this.tooltip = el("div", "caiso-tooltip");
     this.tooltip.hidden = true;
-    this.resolution = el("div", "caiso-resolution");
+    this.subheader = el("div", "panel-subheader");
+    this.subheader.append(this.ranges, this.legend);
+    this.legend.setAttribute("aria-label", "Chart legend");
+    this.legend.setAttribute("role", "group");
     this.viewport.append(
       this.mount,
       this.empty,
-      this.legend,
-      this.resolution,
       this.tooltip,
     );
-    this.element.replaceChildren(this.ribbon, this.ranges, this.viewport);
+    this.element.replaceChildren(this.ribbon, this.subheader, this.viewport);
     this.updateButtons();
     this.resizeObserver = new ResizeObserver(() => this.resizeChart());
     this.resizeObserver.observe(this.mount);
@@ -188,7 +191,7 @@ export class CaisoPanel {
       {
         width: Math.max(1, this.mount.clientWidth),
         height: Math.max(250, this.mount.clientHeight),
-        padding: [26, 8, 0, 8],
+        padding: [4, 8, 0, 8],
         legend: { show: false },
         tzDate: (timestamp) =>
           window.uPlot.tzDate(new Date(timestamp * 1000), "Etc/UTC"),
@@ -203,11 +206,12 @@ export class CaisoPanel {
             space: 90,
             grid: { stroke: "#242733", width: 1, dash: [3, 3] },
             ticks: { stroke: "#242733" },
-            values: (_plot, ticks) =>
-              ticks.map((epoch) => utcLabel(epoch).slice(5)),
+            values: utcTicks,
           },
           {
             side: 1,
+            align: 2,
+            alignTo: 2,
             size: 60,
             stroke: "#787b86",
             font: "10px Consolas, monospace",
@@ -228,6 +232,7 @@ export class CaisoPanel {
               else
                 for (let index = 1; index < plot.series.length; index++)
                   if (plot.series[index].show) drawBoundedSeries(plot, index);
+              drawRulers(plot);
               this.element.dispatchEvent(
                 new CustomEvent("chart-view-updated", {
                   bubbles: true,
@@ -257,7 +262,7 @@ export class CaisoPanel {
               this.save();
             },
           ],
-          setCursor: [(plot) => this.showTooltip(plot)],
+          setCursor: [(plot) => { updateAxisPills(plot); this.showTooltip(plot); }],
           destroy: [
             () => {
               this.renderer?.dispose();
@@ -314,6 +319,7 @@ export class CaisoPanel {
         const button = el("button", "", component.label);
         button.type = "button";
         button.style.setProperty("--trace-color", component.color);
+        button.dataset.component = component.key;
         button.addEventListener("click", () => this.toggle(index));
         return button;
       }),
@@ -380,9 +386,6 @@ export class CaisoPanel {
     try {
       this.empty.hidden = data[0].length > 0;
       this.empty.textContent = "NO_RECORDS_FOUND_FOR_DATE_RANGE";
-      this.resolution.textContent = this.history.preview
-        ? `${this.history.sourceCount.toLocaleString()} TIMESTAMPS · CACHING EXACT HISTORY · UTC`
-        : `${this.history.epochs.length.toLocaleString()} EXACT TIMESTAMPS · ${data[0].length.toLocaleString()} DISPLAY POINTS · UTC`;
       this.chart.batch(() => {
         this.chart.setData(data, false);
         this.chart.setScale("x", { min, max });
@@ -441,6 +444,7 @@ export class CaisoPanel {
       const row = el("div", "caiso-tooltip-row");
       const label = el("span", "", component.label);
       label.style.setProperty("--trace-color", component.color);
+      label.dataset.component = component.key;
       const value = this.history.values[column][index];
       row.append(
         label,
