@@ -74,12 +74,29 @@ export function loadResearchHistory(dataset, entity) {
   return cached(histories, `${dataset.key}:${dataset.revision}:${entity}`, () =>
     request(
       `/api/research/data?${new URLSearchParams({ feed: dataset.key, entity, max_points: "0" })}`,
-    ).then((payload) => {
-      if (!Array.isArray(payload.series))
-        throw new Error("Invalid research series payload");
-      return { ...payload, series: payload.series.map(payload.kind === "intervals" ? prepareOutageTrace : prepareTrace) };
-    }),
+    ).then((payload) => prepareResearchHistory(payload, dataset)),
   );
+}
+export function prepareResearchHistory(payload, dataset = {}) {
+  if (!payload || !Array.isArray(payload.series))
+    throw new Error("Invalid research series payload");
+  const intervalFeed =
+    payload.kind === "intervals" ||
+    payload.feed === "outages" ||
+    dataset.researchFeed === "outages" ||
+    payload.series.some((trace) => Array.isArray(trace?.events));
+  if (intervalFeed) {
+    if (payload.series.some((trace) => !Array.isArray(trace?.events)))
+      throw new Error(
+        "OUTAGE_SCHEMA_MISMATCH: expected start/end events. Restart python server.py and reload this page.",
+      );
+    return {
+      ...payload,
+      kind: "intervals",
+      series: payload.series.map(prepareOutageTrace),
+    };
+  }
+  return { ...payload, series: payload.series.map(prepareTrace) };
 }
 export function sampleTrace(trace, min, max, budget = 1500) {
   const first = lowerBound(trace.epochs, min),

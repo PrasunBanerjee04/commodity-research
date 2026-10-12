@@ -98,6 +98,15 @@ separate cost from warm interactions; response times depend on dataset size and
 hardware. These feeds use locally pinned Plotly 2.35.2 `scattergl` traces, docked
 square legends, and shared terminal styling. Existing LMP views retain uPlot.
 
+The port-8000 server versions the full frontend module graph and revalidates
+scripts/styles on reload, preventing an older time-series parser from being
+combined with a newer outage panel. Interval responses are recognized by their
+event arrays as well as the `kind` field. If an outage response lacks start/end
+events, the pane displays `OUTAGE_SCHEMA_MISMATCH` with restart instructions.
+After updating code, restart `python server.py`; an existing tab may need one
+hard refresh to replace assets cached by earlier releases. No backfill is needed
+for a frontend schema or caching error.
+
 ## Validation
 
 Backend and Chromium checks cover the supplied schemas, date/dimension filters,

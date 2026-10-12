@@ -19,7 +19,7 @@ import duckdb
 import polars as pl
 import uvicorn
 from fastapi import FastAPI, HTTPException, Request
-from fastapi.responses import FileResponse, JSONResponse, Response
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 from starlette.middleware.gzip import GZipMiddleware
 
@@ -39,6 +39,38 @@ from comm_research.dashboard.research_lake import ResearchMemoryLake
 LOG = logging.getLogger("caiso.workstation")
 FEEDS = {"DAM": ("dam_lmp", "da_lmp"), "RTM": ("rtm_lmp", "rt_lmp")}
 COMPONENTS = ("lmp", "energy", "congestion", "loss")
+
+
+def frontend_document(path: Path) -> tuple[str, str]:
+    """Version the entire ES module graph, including relative child imports.
+
+    A version on main.js alone leaves its relative imports cached at their old
+    URLs. An import map assigns every application module a common content
+    version, so a page cannot mix an old parser with a new panel.
+    """
+    modules = sorted((WEB_ROOT / "src").rglob("*.js"))
+    styles = sorted((WEB_ROOT / "styles").glob("*.css"))
+    digest = hashlib.sha256()
+    for asset in [*modules, *styles]:
+        digest.update(asset.relative_to(WEB_ROOT).as_posix().encode())
+        digest.update(asset.read_bytes())
+    version = digest.hexdigest()[:16]
+    urls = ["/" + asset.relative_to(WEB_ROOT).as_posix() for asset in modules]
+    imports = {url: f"{url}?v={version}" for url in urls}
+    html = path.read_text()
+    import_map = (
+        '<script type="importmap">' + json.dumps({"imports": imports}) + "</script>"
+    )
+    html = html.replace(
+        '<script type="module"', import_map + '\n    <script type="module"', 1
+    )
+    for asset in [*modules, *styles]:
+        url = "/" + asset.relative_to(WEB_ROOT).as_posix()
+        html = html.replace('src="' + url + '"', 'src="' + url + "?v=" + version + '"')
+        html = html.replace(
+            'href="' + url + '"', 'href="' + url + "?v=" + version + '"'
+        )
+    return html, version
 
 
 def resolve_market(feed: str) -> str:
@@ -393,6 +425,17 @@ def create_app(
     app = FastAPI(title="CAISO Commodities Workstation", lifespan=lifespan)
     app.add_middleware(GZipMiddleware, minimum_size=1024, compresslevel=3)
 
+    @app.middleware("http")
+    async def revalidate_frontend(request: Request, call_next):
+        response = await call_next(request)
+        if request.url.path in {"/", "/popout.html"} or request.url.path.startswith(
+            ("/src/", "/styles/")
+        ):
+            response.headers["Cache-Control"] = "no-cache, must-revalidate"
+        elif request.url.path.startswith("/api/research/"):
+            response.headers["Cache-Control"] = "no-store"
+        return response
+
     @app.exception_handler(ValueError)
     @app.exception_handler(TypeError)
     async def invalid_query(_request: Request, error: ValueError):
@@ -516,7 +559,8 @@ def create_app(
 
     @app.get("/")
     def index():
-        return FileResponse(static_root / "index.html")
+        html, version = frontend_document(static_root / "index.html")
+        return HTMLResponse(html, headers={"X-Frontend-Version": version})
 
     return app
 

@@ -196,3 +196,30 @@ test('outage display ceiling preserves individual event values with a visible co
   assert.equal(points.x.length,1500); assert.equal(points.count,1000); assert.equal(points.displayed,500);
   assert.equal(points.y[0],0); assert.equal(points.y.at(-2),999);
 });
+
+const { prepareResearchHistory, clearResearchHistories, loadResearchHistory } = await import('../src/comm_research/dashboard/ui/src/research_history.js');
+test('outage parsing recognizes interval shape when the kind tag is absent', () => {
+  const series = [{dimensions:{ti_direction:'I',record_status:'V'},events:[{
+    start:'2029-01-01T00:00:00Z',end:'2029-01-05T00:00:00Z',value:17,
+  }]}];
+  for (const payload of [{series}, {feed:'outages',series}, {kind:'intervals',series}]) {
+    const history=prepareResearchHistory(payload);
+    assert.equal(history.kind,'intervals');assert.equal(history.series[0].events[0].value,17);
+  }
+  assert.deepEqual(prepareResearchHistory({feed:'outages',series:[]}).series,[]);
+  assert.throws(()=>prepareResearchHistory({feed:'outages',series:[{timestamps:[],values:[]}]}),/OUTAGE_SCHEMA_MISMATCH/);
+  assert.throws(()=>prepareResearchHistory({kind:'intervals',series:[series[0],{timestamps:[],values:[]}]}),/OUTAGE_SCHEMA_MISMATCH/);
+  assert.equal(prepareResearchHistory({series:[{timestamps:['2029-01-01T00:00:00Z'],values:[2]}]}).series[0].values[0],2);
+});
+test('a rejected outage response is evicted so RESET can retrieve a repaired response', async () => {
+  const original=global.fetch;clearResearchHistories();let attempts=0;
+  const dataset={key:'power_gas/napg/caiso/transmission_outages',researchFeed:'outages',revision:'schema-retry'};
+  try {
+    global.fetch=async()=>new Response(JSON.stringify(++attempts===1
+      ? {series:[{timestamps:[],values:[]}]}
+      : {series:[{dimensions:{},events:[{start:'2029-01-01T00:00:00Z',end:'2029-01-02T00:00:00Z',value:17}]}]}));
+    await assert.rejects(loadResearchHistory(dataset,'VICTVL_ITC'),/OUTAGE_SCHEMA_MISMATCH/);
+    assert.equal((await loadResearchHistory(dataset,'VICTVL_ITC')).series[0].events[0].value,17);
+    await loadResearchHistory(dataset,'VICTVL_ITC');assert.equal(attempts,2);
+  } finally {global.fetch=original;clearResearchHistories();}
+});

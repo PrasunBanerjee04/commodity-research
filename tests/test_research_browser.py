@@ -223,6 +223,51 @@ class ResearchBrowserTests(unittest.TestCase):
         self.assertEqual(panel.get_attribute("data-trace-count"), "1")
         self.assertEqual(len(self.requests), before)
 
+    def test_outage_missing_kind_and_stale_module_urls_recover(self):
+        # Model an unversioned module cached by the previous UI release. A
+        # current document must never import this URL, even indirectly.
+        stale_hits = []
+        self.page.route(
+            "**/src/research_history.js",
+            lambda route: (
+                stale_hits.append(route.request.url),
+                route.fulfill(
+                    content_type="text/javascript",
+                    body='throw new Error("STALE_RESEARCH_MODULE");',
+                ),
+            ),
+        )
+
+        def without_kind(route):
+            response = route.fetch()
+            payload = response.json()
+            payload.pop("kind", None)
+            payload.pop("feed", None)
+            route.fulfill(response=response, json=payload)
+
+        self.page.route("**/api/research/data?*", without_kind)
+        self.page.reload(wait_until="networkidle")
+        panel = self.open_feed("transmission_outages")
+        self.assertEqual(panel.get_attribute("data-trace-count"), "2")
+        self.assertEqual(stale_hits, [])
+        self.assertTrue(
+            any(
+                "/src/research_history.js?v=" in item["name"]
+                for item in self.page.evaluate(
+                    "performance.getEntriesByType('resource').map(item=>({name:item.name}))"
+                )
+            )
+        )
+        self.assertTrue(panel.locator(".caiso-empty").evaluate("el=>el.hidden"))
+        with urlopen(self.url) as response:
+            document = response.read().decode()
+            version = response.headers["X-Frontend-Version"]
+            self.assertIn("must-revalidate", response.headers["Cache-Control"])
+            self.assertIn(f"/src/research_history.js?v={version}", document)
+            self.assertIn('type="importmap"', document)
+        with urlopen(self.url + f"/src/research_history.js?v={version}") as response:
+            self.assertIn("must-revalidate", response.headers["Cache-Control"])
+
     def test_as_stack_totals_legend_rebase_and_resize(self):
         panel = self.open_feed("as_req")
         before = len(self.requests)
