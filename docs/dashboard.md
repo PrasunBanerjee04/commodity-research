@@ -39,6 +39,13 @@ the active theme. A fresh workspace opens CAISO Day-Ahead and Real-Time LMP side
 by side when both are available; otherwise it opens the available LMP feed or
 first discovered feed. Saved workspace layouts are preserved.
 
+Drag a rectangle inside any generic chart to zoom its time and value axes.
+Wheel zoom centers on the cursor; **Shift+drag** pans time. Double-click or
+**RESET** restores the selected date window and automatic value scale while
+retaining signals and filters. These gestures operate on the browser cache and
+leave the other panes' ranges unchanged. The port-8000 workstation additionally
+provides the dedicated interval-based [transmission outage view](caiso_research_views.md).
+
 ## Signals and analytics
 
 Both supplied CAISO formats are supported directly:

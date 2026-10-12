@@ -79,7 +79,10 @@ export class CaisoPanel {
     this.tooltip = el("div", "caiso-tooltip");
     this.tooltip.hidden = true;
     this.subheader = el("div", "panel-subheader");
-    this.subheader.append(this.ranges, this.legend);
+    this.reset = el("button", "panel-reset", "RESET");
+    this.reset.type = "button";
+    this.reset.addEventListener("click", () => this.resetZoom());
+    this.subheader.append(this.ranges, this.reset, this.legend);
     this.legend.setAttribute("aria-label", "Chart legend");
     this.legend.setAttribute("role", "group");
     this.viewport.append(
@@ -223,7 +226,7 @@ export class CaisoPanel {
         cursor: {
           x: true,
           y: true,
-          drag: { x: true, y: false, setScale: true },
+          drag: { x: true, y: true, setScale: true, dist: 5 },
         },
         hooks: {
           draw: [
@@ -277,6 +280,8 @@ export class CaisoPanel {
     this.chart.over.addEventListener("mouseleave", () => {
       this.tooltip.hidden = true;
     });
+    this.chart.over.title = "Drag to zoom · Wheel to zoom · Shift-drag to pan · Double-click or RESET to restore";
+    this.chart.over.addEventListener("dblclick", () => this.resetZoom());
     // Wheel zoom and Shift+drag pan are local; ordinary drag remains zoom-box.
     this.wheelListener = (event) => {
       event.preventDefault();
@@ -340,9 +345,15 @@ export class CaisoPanel {
     return { min: Math.max(first, min), max: last === first ? last + 1 : last };
   }
 
+  resetZoom() {
+    if (!this.chart || !this.history) return;
+    this.selectRange("ALL");
+  }
+
   selectRange(range) {
     if (!this.history?.epochs.length) return;
     this.range = range === "CUSTOM" ? "ALL" : range;
+    this.chart?.setScale("y", { min: null, max: null });
     const bounds = this.bounds(this.range);
     this.renderRange(bounds.min, bounds.max);
     this.updateButtons();

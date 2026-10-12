@@ -5,6 +5,7 @@ import {
   stackTraces,
 } from "./research_history.js";
 import { popoutButton } from "./chart_chrome.js";
+import { outageBounds, outagePoints } from "./outage_history.js";
 
 const COLORS = [
   "#2962FF",
@@ -48,6 +49,7 @@ function el(tag, cls, text) {
   return node;
 }
 export function traceColor(dimensions, feed) {
+  if (feed === "outages") return dimensions.ti_direction === "I" ? COLORS[0] : COLORS[1];
   if (feed === "ancillary") return AS_COLORS[dimensions.anc_type] || COLORS[5];
   if (feed === "transmission")
     return dimensions.measure === "USEAGE_MW"
@@ -73,6 +75,7 @@ function utcEpoch(value) {
 }
 function traceLabel(trace, feed) {
   const d = trace.dimensions;
+  if (feed === "outages") return `CURTAILED OTC · ${d.ti_direction === "I" ? "IMPORT" : d.ti_direction === "E" ? "EXPORT" : d.ti_direction} · ${d.record_status}`;
   if (feed === "ancillary") return d.anc_type;
   if (feed === "transmission")
     return [d.measure, d.market_run_id, d.ti_direction, d.ti_constraint_id]
@@ -127,6 +130,7 @@ export class ResearchPanel {
       button.onclick = () => {
         this.range = range;
         this.customBounds = null;
+        this.customY = null;
         this.draw();
       };
       this.ranges.append(button);
@@ -136,17 +140,21 @@ export class ResearchPanel {
     this.reset.onclick = () => {
       this.range = "1M";
       this.customBounds = null;
+      this.customY = null;
       this.hidden.clear();
       this.filters = {};
       void this.selectEntity(this.defaultEntity);
     };
     this.legend = el("div", "chart-legend research-legend");
+    this.eventNotice = el("span", "research-filter-label outage-notice");
+    this.eventNotice.hidden = true;
     this.legend.setAttribute("role", "group");
     this.legend.setAttribute("aria-label", "Chart legend");
-    this.subheader.append(this.ranges, this.reset, this.legend);
+    this.subheader.append(this.ranges, this.reset, this.eventNotice, this.legend);
     this.viewport = el("div", "chart-viewport caiso-viewport pane-body");
     this.mount = el("div", "research-chart");
     this.mount.setAttribute("aria-label", `${this.dataset.title} plot`);
+    this.mount.title = "Drag to zoom · Wheel to zoom · Double-click or RESET to restore";
     this.state = el("div", "caiso-empty", "LOADING_RESEARCH_HISTORY");
     this.state.setAttribute("role", "status");
     this.viewport.append(this.mount, this.state);
@@ -160,6 +168,8 @@ export class ResearchPanel {
     this.entitySelect.onchange = () => {
       this.filters = {};
       this.hidden.clear();
+      this.customBounds = null;
+      this.customY = null;
       void this.selectEntity(this.entitySelect.value);
     };
     this.resizeObserver = new ResizeObserver(() => this.resizeChart());
@@ -244,7 +254,7 @@ export class ResearchPanel {
               ["market_run_id", "toggle"],
               ["measure", "toggle"],
             ]
-          : [
+          : feed === "outages" ? [["ti_direction", "toggle"], ["record_status", "toggle"]] : [
               ["measure", "select"],
               ["anc_type", "toggle"],
             ];
@@ -268,6 +278,7 @@ export class ResearchPanel {
           selected = values.filter((value) =>
             ["USEAGE_MW", "RATING_ATC"].includes(value),
           );
+        else if (dimension === "record_status") selected = values.includes("V") ? ["V"] : [...values];
         else if (dimension === "anc_type")
           selected = values.filter((value) =>
             ["NR", "RD", "RU", "SR"].includes(value),
@@ -325,6 +336,7 @@ export class ResearchPanel {
   }
   bounds() {
     if (this.customBounds) return this.customBounds;
+    if (this.meta.feed === "outages") return outageBounds(this.history.series, this.range);
     const traces = this.history.series.filter((trace) => trace.epochs.length);
     const min = Math.min(...traces.map((trace) => trace.epochs[0])),
       max = Math.max(...traces.map((trace) => trace.epochs.at(-1)));
@@ -408,6 +420,17 @@ export class ResearchPanel {
         ? stackTraces(visible, bounds.min, bounds.max, budget)
         : null;
     const traces = visible.map((trace, index) => {
+      if (this.meta.feed === "outages") {
+        const points = outagePoints(trace, bounds.min, bounds.max, budget);
+        const color = traceColor(trace.dimensions, this.meta.feed);
+        return { type: "scattergl", name: traceLabel(trace, this.meta.feed),
+          x: points.x, y: points.y, customdata: points.customdata,
+          mode: "lines+markers", connectgaps: false,
+          line: { color, width: 1.75 }, marker: { color, size: 4, symbol: "square" },
+          hovertemplate: `${traceLabel(trace, this.meta.feed)}<br>Curtailed line rating: %{y:.2f} MW<br>START %{customdata[0]}<br>END %{customdata[1]}<br>EQUIPMENT %{customdata[2]}<br>%{customdata[3]}<br>UPDATED %{customdata[4]} UTC<extra></extra>`,
+          meta: { events: points.count, displayed: points.displayed },
+        };
+      }
       const points = stacked?.[index],
         indices = points
           ? null
@@ -478,7 +501,7 @@ export class ResearchPanel {
       autosize: false,
       margin: { l: 10, r: 65, t: 8, b: 32 },
       showlegend: false,
-      hovermode: "x unified",
+      hovermode: this.meta.feed === "outages" ? "closest" : "x unified",
       dragmode: "zoom",
       hoverlabel: {
         bgcolor: "#1E222D",
@@ -502,6 +525,7 @@ export class ResearchPanel {
         linewidth: 1,
         tickformat: ".2f",
         rangemode: stacked ? "tozero" : "normal",
+        ...(this.customY ? { range: this.customY, autorange: false } : {}),
       },
       shapes: [
         {
@@ -523,6 +547,7 @@ export class ResearchPanel {
       displayModeBar: false,
       scrollZoom: true,
       responsive: false,
+      doubleClick: "reset",
     });
     if (this.disposed) {
       this.engine.purge(this.mount);
@@ -533,18 +558,29 @@ export class ResearchPanel {
         if (this.drawing) return;
         const left = event["xaxis.range[0]"],
           right = event["xaxis.range[1]"];
+        const bottom = event["yaxis.range[0]"], top = event["yaxis.range[1]"];
+        if (bottom !== undefined && top !== undefined) this.customY = [bottom, top];
+        if (event["yaxis.autorange"]) this.customY = null;
         if (left && right) {
           this.customBounds = { min: utcEpoch(left), max: utcEpoch(right) };
           this.draw();
         } else if (event["xaxis.autorange"]) {
           this.customBounds = null;
           this.range = "ALL";
+          this.customY = null;
+          this.draw();
+        } else if (bottom !== undefined || event["yaxis.autorange"]) {
           this.draw();
         }
       };
       this.mount.on("plotly_relayout", this.zoomListener);
     }
     this.element.dataset.traceCount = String(traces.length);
+    this.element.dataset.displayedEvents = String(traces.reduce((sum, trace) => sum + (trace.meta?.displayed || 0), 0));
+    this.element.dataset.matchingEvents = String(traces.reduce((sum, trace) => sum + (trace.meta?.events || 0), 0));
+    this.eventNotice.hidden = this.meta.feed !== "outages";
+    this.eventNotice.textContent = traces.some(trace => trace.meta?.events > trace.meta?.displayed)
+      ? "EVENT DISPLAY LIMIT · NARROW RANGE" : "CURTAILED LINE RATING · MW";
     this.save();
     this.rendered();
     this.resizeChart();

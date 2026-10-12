@@ -141,6 +141,76 @@ class DashboardBrowserTests(unittest.TestCase):
             ["2023-07-08", "2023-07-08"],
         )
 
+    def test_generic_drag_wheel_pan_and_reset_are_local_and_independent(self):
+        requests = []
+        self.page.on(
+            "request",
+            lambda request: (
+                requests.append(request.url) if "/api/" in request.url else None
+            ),
+        )
+        self.open()
+        self.assert_canvases(2)
+        panels = self.page.locator(".market-panel")
+        first, second = panels.nth(0), panels.nth(1)
+        original = (
+            first.get_attribute("data-view-min"),
+            first.get_attribute("data-view-max"),
+        )
+        second_original = (
+            second.get_attribute("data-view-min"),
+            second.get_attribute("data-view-max"),
+        )
+        before = len(requests)
+        box = first.locator(".u-over").bounding_box()
+        self.page.mouse.move(
+            box["x"] + box["width"] * 0.15, box["y"] + box["height"] * 0.2
+        )
+        self.page.mouse.down()
+        self.page.mouse.move(
+            box["x"] + box["width"] * 0.65, box["y"] + box["height"] * 0.8, steps=8
+        )
+        self.page.mouse.up()
+        self.page.wait_for_function(
+            "el=>el.querySelectorAll('[data-range].active').length===0",
+            arg=first.element_handle(),
+        )
+        zoomed = float(first.get_attribute("data-view-max")) - float(
+            first.get_attribute("data-view-min")
+        )
+        self.assertLess(zoomed, float(original[1]) - float(original[0]))
+        self.page.mouse.move(
+            box["x"] + box["width"] * 0.4, box["y"] + box["height"] * 0.4
+        )
+        self.page.mouse.wheel(0, -100)
+        self.page.wait_for_function(
+            "([el,span])=>Number(el.dataset.viewMax)-Number(el.dataset.viewMin)<span",
+            arg=[first.element_handle(), zoomed],
+        )
+        pan_before = first.get_attribute("data-view-min")
+        self.page.keyboard.down("Shift")
+        self.page.mouse.down()
+        self.page.mouse.move(
+            box["x"] + box["width"] * 0.5, box["y"] + box["height"] * 0.4, steps=6
+        )
+        self.page.mouse.up()
+        self.page.keyboard.up("Shift")
+        self.assertNotEqual(first.get_attribute("data-view-min"), pan_before)
+        first.locator(".panel-reset").click()
+        self.page.wait_for_function(
+            "([el,min])=>el.dataset.viewMin===min",
+            arg=[first.element_handle(), original[0]],
+        )
+        self.assertEqual(first.get_attribute("data-view-max"), original[1])
+        self.assertEqual(
+            (
+                second.get_attribute("data-view-min"),
+                second.get_attribute("data-view-max"),
+            ),
+            second_original,
+        )
+        self.assertEqual(len(requests), before)
+
     def test_webgl_unavailable_uses_visible_canvas_fallback(self):
         self.page.add_init_script("""const original = HTMLCanvasElement.prototype.getContext;
           HTMLCanvasElement.prototype.getContext = function(type, ...options) {

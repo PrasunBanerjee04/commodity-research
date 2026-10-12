@@ -170,3 +170,29 @@ test('AS stacking rebases isolated services and does not fabricate missing MW',(
   assert.equal(stack[1].values[0],20);
   assert.deepEqual(stackTraces([ru],nr.epochs[0],nr.epochs.at(-1))[0].y,[20,null]);
 });
+
+const { prepareOutageTrace, outageBounds, outagePoints } = await import('../src/comm_research/dashboard/ui/src/outage_history.js');
+test('outage windows overlap locally, retain coincident records and never interpolate gaps', () => {
+  const trace = prepareOutageTrace({ dimensions: {ti_direction:'I',record_status:'V'}, events: [
+    {start:'2029-01-01T00:00:00Z',end:'2029-01-05T00:00:00Z',value:17,equipment:'A',notes:'<line>'},
+    {start:'2029-01-01T00:00:00Z',end:'2029-01-05T00:00:00Z',value:13,equipment:'B'},
+    {start:'2029-01-06T00:00:00Z',end:'2029-01-08T00:00:00Z',value:12,equipment:'A'},
+  ]});
+  const start=Date.parse('2029-01-02T00:00:00Z')/1000,end=start+86400;
+  const points=outagePoints(trace,start,end);
+  assert.deepEqual(points.y,[17,17,null,13,13,null]);
+  assert.equal(points.customdata[0][0],'2029-01-01T00:00:00Z');
+  assert.equal(points.customdata[0][3],'&lt;line&gt;');
+  assert.equal(points.x[0],'2029-01-02T00:00:00.000Z');
+  assert.equal(outagePoints(trace,Date.parse('2029-01-05T00:00:00Z')/1000,Date.parse('2029-01-06T00:00:00Z')/1000-1).x.length,0);
+  const bounds=outageBounds([trace],'1M',Date.parse('2026-01-01T00:00:00Z')/1000);
+  assert.equal(bounds.min,trace.epochs[0]);
+  assert.equal(outageBounds([trace],'ALL').max,Date.parse('2029-01-08T00:00:00Z')/1000);
+  assert.throws(()=>prepareOutageTrace({events:[{start:'bad',end:'bad',value:1}]}),/Invalid outage/);
+});
+test('outage display ceiling preserves individual event values with a visible count', () => {
+  const trace=prepareOutageTrace({dimensions:{},events:Array.from({length:1000},(_,i)=>({start:new Date(Date.UTC(2029,0,1)+i*3600000).toISOString(),end:new Date(Date.UTC(2029,0,1)+(i+1)*3600000).toISOString(),value:i}))});
+  const points=outagePoints(trace,trace.epochs[0],Infinity,1500);
+  assert.equal(points.x.length,1500); assert.equal(points.count,1000); assert.equal(points.displayed,500);
+  assert.equal(points.y[0],0); assert.equal(points.y.at(-2),999);
+});

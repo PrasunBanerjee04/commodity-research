@@ -38,8 +38,11 @@ mean the complete multi-year history has already downloaded.
 - **1D / 5D / 1M / YTD / ALL** select local UTC ranges. 1M is 30 days; YTD
   starts January 1 of the latest available data year. These ranges anchor to
   available data, so older lake snapshots still render immediately.
-- Drag a box to zoom horizontally, use the wheel to zoom around the cursor,
-  and **Shift+drag** to pan. Each pane has independent state.
+- Drag a box to zoom time and value axes, use the wheel to zoom around the
+  cursor, and **Shift+drag** to pan. Double-click or **RESET** restores the full
+  LMP history and automatic value scale. Each pane has independent state.
+  Generic feeds now support the same local drag/wheel/pan interactions; their
+  RESET restores the currently selected date window without changing filters.
 - Reopening a feed focuses its singleton tab. **2-SPLIT** places DAM left and
   RTM right. **1-PANE / 4-SPLIT** reuse existing panels; scarce feeds are never
   cloned to fill empty slots. Other lake datasets retain their generic controls.

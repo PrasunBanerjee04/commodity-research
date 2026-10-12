@@ -2,6 +2,7 @@ import { loadMetadata, loadOptions, loadSeries } from "./api.js";
 import { feedCache } from "./query_cache.js";
 import { emptyPaths } from "./canvas_paths.js";
 import { LineRenderer } from "./line_renderer.js";
+import { bindChartNavigation } from "./chart_navigation.js";
 import { METRIC_TOKENS, utcTicks, drawRulers, updateAxisPills, popoutButton } from "./chart_chrome.js";
 
 const COMPONENT_ALIASES = { MCE: "ENERGY", MCC: "CONG", MCL: "LOSS", MGHG: "GHG" };
@@ -103,6 +104,7 @@ export class ChartPanel {
         <div class="range-control" role="group" aria-label="Date range">
           ${DATE_RANGES.map((range) => `<button type="button" data-range="${range}">${range}</button>`).join("")}
         </div>
+        <button class="panel-reset" type="button">RESET</button>
         <label><span class="sr-only">Start date</span><input class="panel-date" data-date="start" type="date"></label>
         <label><span class="sr-only">End date</span><input class="panel-date" data-date="end" type="date"></label>
         <div class="component-ribbon" role="group" aria-label="LMP Components"></div>
@@ -141,6 +143,7 @@ export class ChartPanel {
     window.addEventListener("pagehide", this.pageHideListener);
 
     this.container.querySelector(".panel-update").addEventListener("click", () => this.refresh());
+    this.container.querySelector(".panel-reset").addEventListener("click", () => this.resetZoom());
     this.container.querySelectorAll("[data-range]").forEach((button) => {
       button.addEventListener("click", () => this.applyRange(button.dataset.range));
     });
@@ -566,7 +569,15 @@ export class ChartPanel {
         padding: [4, 8, 0, 8],
         tzDate: timestamp => window.uPlot.tzDate(new Date(timestamp * 1000), "Etc/UTC"),
         scales: { x: { time: true } },
-        hooks: { draw: [plot => { renderer.draw(plot); drawRulers(plot); }, () => this.viewRendered()], setCursor: [updateAxisPills], destroy: [() => renderer.dispose()] },
+        hooks: {
+          draw: [plot => {
+            renderer.draw(plot); drawRulers(plot);
+            this.container.dataset.viewMin = String(plot.scales.x.min);
+            this.container.dataset.viewMax = String(plot.scales.x.max);
+          }, () => this.viewRendered()],
+          setCursor: [updateAxisPills],
+          destroy: [() => { renderer.dispose(); this.unbindNavigation?.(); this.unbindNavigation = null; }],
+        },
         series: [
           { value: (_plot, timestamp) => timestamp == null ? "" : new Date(timestamp * 1000).toISOString() },
           ...definitions,
@@ -598,10 +609,15 @@ export class ChartPanel {
           y: true,
         // Default marker factory creates elements required by dynamic delSeries.
         // CSS hides the markers while retaining the crosshair.
-          drag: { setScale: false, x: false, y: false },
+          drag: { setScale: true, x: true, y: true, dist: 5 },
         },
         legend: { show: false },
       }, data, this.mount);
+      this.unbindNavigation = bindChartNavigation(this.chart, {
+        reset: () => this.resetZoom(), changed: () => {
+          this.container.querySelectorAll("[data-range]").forEach(button => button.classList.remove("active"));
+        },
+      });
       this.chartLabels = labels;
     }
     this.legend.replaceChildren();
@@ -640,6 +656,13 @@ export class ChartPanel {
         this.showError(error, "CHART_RENDER_ERROR");
       }
     });
+  }
+
+  resetZoom() {
+    if (!this.chart) return;
+    this.chart.setData(this.chart.data);
+    this.container.querySelectorAll("[data-range]").forEach(button =>
+      button.classList.toggle("active", button.dataset.range === this.settings.range));
   }
 
   destroyChart() {

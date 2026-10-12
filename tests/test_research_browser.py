@@ -19,7 +19,7 @@ from urllib.request import urlopen
 import uvicorn
 
 from comm_research.dashboard.server import create_app
-from tests.test_research_lake import write_research_fixture
+from tests.test_research_lake import write_outage_fixture, write_research_fixture
 
 
 @unittest.skipUnless(
@@ -39,6 +39,7 @@ class ResearchBrowserTests(unittest.TestCase):
         cls.temporary = tempfile.TemporaryDirectory()
         cls.root = Path(cls.temporary.name)
         write_research_fixture(cls.root)
+        write_outage_fixture(cls.root)
         cls.socket = socket.socket()
         cls.socket.bind(("127.0.0.1", 0))
         cls.port = cls.socket.getsockname()[1]
@@ -164,6 +165,62 @@ class ResearchBrowserTests(unittest.TestCase):
             'el=>el.querySelector(".research-chart").data.every(trace=>trace.name.includes(" · W · "))',
             arg=panel.element_handle(),
         )
+        self.assertEqual(len(self.requests), before)
+
+    def test_outage_duration_segments_direction_and_local_zoom(self):
+        panel = self.open_feed("transmission_outages")
+        plot = panel.locator(".research-chart")
+        before = len(self.requests)
+        traces = plot.evaluate(
+            "el=>el.data.map(trace=>({name:trace.name,x:trace.x,y:trace.y,detail:trace.customdata}))"
+        )
+        self.assertEqual(len(traces), 2)
+        self.assertTrue(
+            any(
+                "IMPORT" in trace["name"] and 17 in trace["y"] and 13 in trace["y"]
+                for trace in traces
+            )
+        )
+        self.assertTrue(all(None in trace["y"] for trace in traces))
+        self.assertEqual(panel.get_attribute("data-matching-events"), "4")
+        self.assertIn("CURTAILED LINE RATING", panel.inner_text())
+        self.assertTrue(
+            any(
+                trace["detail"][0][3] == "Scheduled maintenance &lt;line&gt;"
+                for trace in traces
+            )
+        )
+        self.click_and_wait(panel, '[data-range="ALL"]')
+        original = plot.evaluate(
+            "el=>({x:el._fullLayout.xaxis.range,y:el._fullLayout.yaxis.range})"
+        )
+        box = plot.evaluate(
+            "el=>{const b=el.getBoundingClientRect(),s=el._fullLayout._size;return {x:b.x+s.l,y:b.y+s.t,width:s.w,height:s.h}}"
+        )
+        self.page.mouse.move(
+            box["x"] + box["width"] * 0.15, box["y"] + box["height"] * 0.15
+        )
+        self.page.mouse.down()
+        self.page.mouse.move(
+            box["x"] + box["width"] * 0.6, box["y"] + box["height"] * 0.75, steps=8
+        )
+        self.page.mouse.up()
+        self.page.wait_for_function(
+            "el=>el._fullLayout.yaxis.autorange===false", arg=plot.element_handle()
+        )
+        zoomed = plot.evaluate(
+            "el=>({x:el._fullLayout.xaxis.range,y:el._fullLayout.yaxis.range})"
+        )
+        self.assertNotEqual(zoomed["x"], original["x"])
+        self.assertLess(
+            zoomed["y"][1] - zoomed["y"][0], original["y"][1] - original["y"][0]
+        )
+        self.page.wait_for_timeout(100)
+        self.assertEqual(plot.evaluate("el=>el._fullLayout.yaxis.range"), zoomed["y"])
+        self.click_and_wait(panel, ".panel-reset")
+        self.assertTrue(plot.evaluate("el=>el._fullLayout.yaxis.autorange"))
+        self.click_and_wait(panel, '[aria-label="ti_direction: E"]')
+        self.assertEqual(panel.get_attribute("data-trace-count"), "1")
         self.assertEqual(len(self.requests), before)
 
     def test_as_stack_totals_legend_rebase_and_resize(self):
