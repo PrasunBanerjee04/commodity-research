@@ -57,6 +57,15 @@ FEEDS = (
         ("anc_type", "measure"),
         "MW",
     ),
+    Feed(
+        "outages",
+        "Transmission Outages",
+        ("transmission_outages", "transmission_outage", "trns_outage"),
+        "ti_id",
+        "curtailed_otc_mw",
+        ("ti_direction", "record_status", "measure"),
+        "MW",
+    ),
 )
 
 
@@ -93,7 +102,7 @@ class ResearchMemoryLake:
             ):
                 return feed
         raise ValueError(
-            "Unknown research feed. Choose crr, transmission, or ancillary."
+            "Unknown research feed. Choose crr, transmission, ancillary, or outages."
         )
 
     def preload(self, catalog: list[dict]) -> list[dict]:
@@ -112,14 +121,19 @@ class ResearchMemoryLake:
                 }
             )
             table = "research_" + feed.name
+            if feed.name == "outages" and not sources:
+                continue
             self.con.execute(f"DROP TABLE IF EXISTS {table}")
             definitions = ", ".join(
                 f"{quote(name)} VARCHAR" for name in (feed.entity, *feed.dimensions)
             )
-            self.con.execute(
-                f"CREATE TABLE {table} (timestamp TIMESTAMPTZ, value DOUBLE, observed_at DATE, {definitions})"
-            )
-            if sources:
+            if feed.name == "outages":
+                self._preload_outages(sources)
+            else:
+                self.con.execute(
+                    f"CREATE TABLE {table} (timestamp TIMESTAMPTZ, value DOUBLE, observed_at DATE, {definitions})"
+                )
+            if sources and feed.name != "outages":
                 schema = self.con.execute(
                     "DESCRIBE SELECT * FROM read_parquet(?,union_by_name=true,hive_partitioning=false)",
                     [sources],
@@ -177,8 +191,9 @@ class ResearchMemoryLake:
             self.con.execute(
                 f"CREATE INDEX idx_{table}_timestamp ON {table}(timestamp)"
             )
+            last_column = "end_timestamp" if feed.name == "outages" else "timestamp"
             count, earliest, latest = self.con.execute(
-                f"SELECT count(*), strftime(min(timestamp), '%Y-%m-%dT%H:%M:%SZ'), strftime(max(timestamp), '%Y-%m-%dT%H:%M:%SZ') FROM {table}"
+                f"SELECT count(*), strftime(min(timestamp), '%Y-%m-%dT%H:%M:%SZ'), strftime(max({last_column}), '%Y-%m-%dT%H:%M:%SZ') FROM {table}"
             ).fetchone()
             entities = [
                 row[0]
@@ -215,6 +230,7 @@ class ResearchMemoryLake:
                 "latest": latest,
                 "observations": count,
                 "revision": revision,
+                "kind": "intervals" if feed.name == "outages" else "timeseries",
             }
             matches = [
                 item
@@ -268,6 +284,8 @@ class ResearchMemoryLake:
         if lower and upper and lower >= upper:
             raise ValueError("start must precede the exclusive end")
         active = entity if entity is not None else next(iter(meta["entities"]), None)
+        if feed.name == "outages":
+            return self._outage_series(active, lower, upper, filters, max_points)
         clauses, parameters = [f"{quote(feed.entity)} = ?"], [active]
         if lower:
             clauses.append("timestamp >= ?")
@@ -337,4 +355,135 @@ class ResearchMemoryLake:
             "series": list(series.values()),
             "start": start,
             "end": end,
+        }
+
+    def _preload_outages(self, sources: list[str]) -> None:
+        """Outages are effective intervals, not prices to average at their start."""
+        schema = self.con.execute(
+            "DESCRIBE SELECT * FROM read_parquet(?,union_by_name=true,hive_partitioning=false)",
+            [sources],
+        ).fetchall()
+        columns = {row[0].lower(): row[0] for row in schema}
+
+        def field(*names: str, required=False):
+            for name in names:
+                if name in columns:
+                    return quote(columns[name])
+            if required:
+                raise ValueError(f"outages: missing required column {names[0]}")
+            return "NULL"
+
+        start = field("interval_start_time_gmt", "intervalstarttime_gmt", required=True)
+        end = field("interval_end_time_gmt", "intervalendtime_gmt", required=True)
+        value = field("curtailed_otc_mw", "outage_limit_mw", "mw", required=True)
+        self.con.execute(
+            f"""CREATE TABLE research_outages AS SELECT
+                TRY_CAST({start} AS TIMESTAMPTZ) AS timestamp,
+                TRY_CAST({end} AS TIMESTAMPTZ) AS end_timestamp,
+                TRY_CAST({value} AS DOUBLE) AS value,
+                TRY_CAST({field("as_of_date")} AS DATE) AS observed_at,
+                TRY_CAST({field("upd_date_gmt", "updated_at")} AS TIMESTAMPTZ) AS updated_at,
+                CAST({field("ti_id", required=True)} AS VARCHAR) AS ti_id,
+                CAST({field("ti_direction", required=True)} AS VARCHAR) AS ti_direction,
+                coalesce(CAST({field("oasis_rec_stat", "record_status")} AS VARCHAR),'UNKNOWN') AS record_status,
+                'CURTAILED_OTC_MW'::VARCHAR AS measure,
+                CAST({field("equipment_outage", "outage_id")} AS VARCHAR) AS equipment_outage,
+                CAST({field("outage_notes", "notes")} AS VARCHAR) AS notes,
+                CAST({field("audit_type")} AS VARCHAR) AS audit_type
+            FROM read_parquet(?,union_by_name=true,hive_partitioning=false)""",
+            [sources],
+        )
+        self.con.execute(
+            "DELETE FROM research_outages WHERE timestamp IS NULL OR end_timestamp IS NULL OR end_timestamp < timestamp OR ti_id IS NULL"
+        )
+        self.con.execute(
+            "UPDATE research_outages SET value=NULL WHERE NOT isfinite(value)"
+        )
+
+    def _outage_series(self, entity, lower, upper, filters, max_points) -> dict:
+        feed = self.resolve("outages")
+        clauses, parameters = ["ti_id = ?"], [entity]
+        if lower:
+            clauses.append(
+                "(end_timestamp > ? OR (end_timestamp=timestamp AND timestamp >= ?))"
+            )
+            parameters.extend([lower, lower])
+        if upper:
+            clauses.append("timestamp < ?")
+            parameters.append(upper)
+        for dimension, values in (filters or {}).items():
+            if (
+                dimension not in feed.dimensions
+                or not isinstance(values, list)
+                or len(values) > 100
+                or any(not isinstance(value, str) for value in values)
+            ):
+                raise ValueError("Invalid research filter")
+            clauses.append(
+                f"{quote(dimension)} IN ({','.join('?' for _ in values)})"
+                if values
+                else "false"
+            )
+            parameters.extend(values)
+        # Deduplicate revisions BEFORE filtering status, so an older V record
+        # cannot reappear when a later record changes its status. Distinct
+        # start/end windows remain separate, even with the same equipment ID.
+        rows = self.con.execute(
+            f"""WITH latest AS (
+                SELECT * FROM research_outages WHERE ti_id=?
+                QUALIFY row_number() OVER (
+                    PARTITION BY ti_id,ti_direction,timestamp,end_timestamp,
+                        coalesce(split_part(equipment_outage,'|',1),notes,'')
+                    ORDER BY updated_at DESC NULLS LAST,observed_at DESC NULLS LAST
+                )=1
+            ) SELECT strftime(timestamp,'%Y-%m-%dT%H:%M:%SZ'),
+                strftime(end_timestamp,'%Y-%m-%dT%H:%M:%SZ'),value,ti_direction,record_status,
+                equipment_outage,notes,audit_type,strftime(updated_at,'%Y-%m-%dT%H:%M:%SZ')
+            FROM latest WHERE {" AND ".join(clauses)} ORDER BY ti_direction,record_status,timestamp,end_timestamp,equipment_outage""",
+            [entity, *parameters],
+        ).fetchall()
+        grouped = {}
+        for row in rows:
+            dimensions = {
+                "ti_direction": row[3],
+                "record_status": row[4],
+                "measure": "CURTAILED_OTC_MW",
+            }
+            key = json.dumps(dimensions, sort_keys=True)
+            trace = grouped.setdefault(
+                key, {"key": key, "dimensions": dimensions, "events": []}
+            )
+            trace["events"].append(
+                {
+                    "start": row[0],
+                    "end": row[1],
+                    "value": row[2],
+                    "equipment": row[5],
+                    "notes": row[6],
+                    "auditType": row[7],
+                    "updatedAt": row[8],
+                }
+            )
+        for trace in grouped.values():
+            events = trace["events"]
+            trace["sourceCount"] = len(events)
+            # Each interval renders two endpoints plus a gap. Never average or
+            # synthesize intervals when limiting a response.
+            limit = max(1, max_points // 3) if max_points else len(events)
+            if len(events) > limit:
+                indices = (
+                    {round(i * (len(events) - 1) / (limit - 1)) for i in range(limit)}
+                    if limit > 1
+                    else {0}
+                )
+                trace["events"] = [events[i] for i in sorted(indices)]
+        meta = self.metadata["outages"]
+        return {
+            "status": "ok" if rows else "empty",
+            "feed": "outages",
+            "kind": "intervals",
+            "entity": entity,
+            "unit": "MW",
+            "revision": meta["revision"],
+            "series": list(grouped.values()),
         }

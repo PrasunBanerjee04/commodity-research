@@ -74,6 +74,47 @@ def write_research_fixture(root: Path, count=2300):
         pl.DataFrame(rows).write_parquet(root / (name + ".parquet"))
 
 
+def write_outage_fixture(root: Path) -> Path:
+    """Published TRNS_OUTAGE columns, including revisions and coincident events."""
+    base = {
+        "TI_ID": "SILVERPK_ITC",
+        "TI_DIRECTION": "I",
+        "INTERVALSTARTTIME_GMT": "2029-01-01T00:00:00Z",
+        "INTERVALENDTIME_GMT": "2029-01-05T00:00:00Z",
+        "CURTAILED_OTC_MW": 15.0,
+        "EQUIPMENT_OUTAGE": "100|Inserted--",
+        "OUTAGE_NOTES": "Scheduled maintenance <line>",
+        "AUDIT_TYPE": "I",
+        "OASIS_REC_STAT": "V",
+        "UPD_DATE_GMT": "2028-12-01T00:00:00Z",
+    }
+    rows = [
+        base,
+        {**base, "CURTAILED_OTC_MW": 17.0, "UPD_DATE_GMT": "2028-12-02T00:00:00Z"},
+        {**base, "EQUIPMENT_OUTAGE": "101|Inserted--", "CURTAILED_OTC_MW": 13.0},
+        {**base, "TI_DIRECTION": "E", "CURTAILED_OTC_MW": 16.0},
+        {
+            **base,
+            "EQUIPMENT_OUTAGE": "102|Inserted--",
+            "OASIS_REC_STAT": "D",
+            "CURTAILED_OTC_MW": 8.0,
+        },
+        {
+            **base,
+            "INTERVALSTARTTIME_GMT": "2029-01-06T00:00:00Z",
+            "INTERVALENDTIME_GMT": "2029-01-08T00:00:00Z",
+            "CURTAILED_OTC_MW": 12.0,
+        },
+    ]
+    folder = (
+        root / "power_gas/napg/caiso/transmission_outages/year=2029/month=01/day=01"
+    )
+    folder.mkdir(parents=True, exist_ok=True)
+    path = folder / "data.parquet"
+    pl.DataFrame(rows).write_parquet(path)
+    return path
+
+
 class ResearchLakeTests(unittest.TestCase):
     def setUp(self):
         self.temporary = tempfile.TemporaryDirectory()
@@ -84,6 +125,69 @@ class ResearchLakeTests(unittest.TestCase):
     def tearDown(self):
         self.lake.close()
         self.temporary.cleanup()
+
+    def test_outage_intervals_overlap_revisions_and_ram_snapshot(self):
+        path = write_outage_fixture(self.root)
+        self.lake.preload()
+        research = self.lake.research
+        self.assertEqual(research.metadata["outages"]["latest"], "2029-01-08T00:00:00Z")
+        result = research.series(
+            "transmission_outages",
+            "SILVERPK_ITC",
+            "2029-01-02",
+            "2029-01-03",
+            {"record_status": ["V"], "ti_direction": ["I"]},
+            0,
+        )
+        self.assertEqual(result["kind"], "intervals")
+        events = result["series"][0]["events"]
+        self.assertEqual([event["value"] for event in events], [17.0, 13.0])
+        self.assertTrue(
+            all(event["start"] == "2029-01-01T00:00:00Z" for event in events)
+        )
+        self.assertEqual(
+            research.series("outages", "SILVERPK_ITC", "2029-01-05", "2029-01-06")[
+                "series"
+            ],
+            [],
+        )
+        path.unlink()
+        self.assertEqual(
+            research.series("outages", "SILVERPK_ITC", max_points=0)["series"][0][
+                "events"
+            ][0]["value"],
+            16.0,
+        )
+        self.assertTrue(
+            any(
+                item["key"].endswith("transmission_outages")
+                and item.get("researchFeed") == "outages"
+                for item in self.lake.datasets
+            )
+        )
+
+    def test_outage_status_change_cannot_resurrect_old_valid_record(self):
+        path = write_outage_fixture(self.root)
+        frame = pl.read_parquet(path, hive_partitioning=False)
+        change = frame.filter(
+            pl.col("EQUIPMENT_OUTAGE").str.starts_with("101")
+        ).with_columns(
+            pl.lit("D").alias("OASIS_REC_STAT"),
+            pl.lit("2028-12-03T00:00:00Z").alias("UPD_DATE_GMT"),
+        )
+        pl.concat([frame, change]).write_parquet(path)
+        self.lake.preload()
+        result = self.lake.research.series(
+            "outages",
+            "SILVERPK_ITC",
+            "2029-01-02",
+            "2029-01-03",
+            {"record_status": ["V"], "ti_direction": ["I"]},
+            0,
+        )
+        self.assertEqual(
+            [event["value"] for event in result["series"][0]["events"]], [17.0]
+        )
 
     def test_exact_schemas_flat_files_and_registered_tabs(self):
         research = self.lake.research

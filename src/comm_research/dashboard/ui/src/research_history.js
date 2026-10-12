@@ -1,5 +1,6 @@
 import { request } from "./http.js";
 import { lowerBound } from "./node_history.js";
+import { prepareOutageTrace } from "./outage_history.js";
 
 const metadata = new Map(),
   histories = new Map();
@@ -76,7 +77,7 @@ export function loadResearchHistory(dataset, entity) {
     ).then((payload) => {
       if (!Array.isArray(payload.series))
         throw new Error("Invalid research series payload");
-      return { ...payload, series: payload.series.map(prepareTrace) };
+      return { ...payload, series: payload.series.map(payload.kind === "intervals" ? prepareOutageTrace : prepareTrace) };
     }),
   );
 }
