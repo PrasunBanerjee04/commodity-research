@@ -1,0 +1,52 @@
+<!doctype html>
+<html lang="en" class="caiso-workstation">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="color-scheme" content="dark light" />
+    <title>Commodities Analytics Dashboard</title>
+    <link rel="stylesheet" href="/vendor/dockview.css" />
+    <link rel="stylesheet" href="/vendor/uPlot.min.css" />
+    <link rel="stylesheet" href="/styles/theme.css" />
+    <link rel="stylesheet" href="/styles/caiso.css" />
+    <script src="/vendor/dockview.min.js"></script>
+    <script src="/vendor/uPlot.iife.min.js"></script>
+    <script type="module" src="/src/main.js"></script>
+  </head>
+  <body>
+    <header class="workstation-ribbon">
+      <div class="brand">Commodities Analytics Dashboard</div>
+      <div class="ribbon-actions">
+        <div class="layout-presets" role="group" aria-label="Panel layout">
+          <button type="button" data-layout="1" class="active">1-PANE</button>
+          <button type="button" data-layout="2">2-SPLIT</button>
+          <button type="button" data-layout="4">4-SPLIT</button>
+        </div>
+        <button id="theme-toggle" class="flat-button" type="button" aria-label="Toggle color theme">LIGHT</button>
+        <button id="rescan-button" class="flat-button" type="button">RESCAN</button>
+        <button id="navigator-toggle" class="flat-button" type="button" aria-label="Toggle data lake navigator">DATA</button>
+      </div>
+    </header>
+    <div class="application-shell">
+      <aside class="navigator" id="navigator">
+        <div class="navigator-heading">
+          <span>DATA LAKE</span>
+          <span id="dataset-count">CONNECTING</span>
+        </div>
+        <label class="search-control">
+          <span class="sr-only">Filter data lake</span>
+          <input id="dataset-search" type="search" placeholder="Filter feeds" autocomplete="off" />
+        </label>
+        <nav id="dataset-tree" class="dataset-tree" aria-label="Local data lake"></nav>
+        <div id="status-message" class="status-message" role="status"></div>
+      </aside>
+      <main class="dock-region">
+        <div id="dockview" aria-label="Commodities analytics panels"></div>
+        <div id="empty-workspace" class="empty-state">
+          <span>NO_DATA_AVAILABLE_FOR_FILTER_RANGE</span>
+          <small>OPEN A FEED FROM THE DATA LAKE NAVIGATOR</small>
+        </div>
+      </main>
+    </div>
+  </body>
+</html>

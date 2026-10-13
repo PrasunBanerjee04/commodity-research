@@ -11,15 +11,19 @@ A Python workspace for commodity data, analytics, and market-specific research. 
 | `data/lake/` | Local processed data and analytical datasets |
 | `dags/` | Standalone Airflow workflows |
 | `notebooks/` | Research and visualizations |
-| `src/comm_research/infra/` | Database, scraper, and developer-tool infrastructure |
+| `src/comm_research/infra/` | Shared HTTP, lake storage, locking, and path infrastructure |
 | `src/comm_research/common/` | Analytics shared across markets: math, curves, and models |
-| `src/comm_research/markets/` | Commodity-specific research and analytics |
+| `src/comm_research/markets/` | Market-owned scrapers, transforms, pipelines, models, analytics, and query adapters |
+| `src/comm_research/dashboard/` | Shared dashboard server, chart engines, and workspace UI |
 
-Local data and `.env` are excluded from Git.
+See [repository architecture](docs/architecture.md) for ownership rules, the new
+scaffolds, canonical imports, and compatibility paths. Local data and `.env` are
+excluded from Git.
 
 ## Local data lake
 
-Processed datasets live under `data/lake/<market>/<dataset>/`. Partition time-based
+Processed datasets follow the market package taxonomy under `data/lake/`, for
+example `power_gas/napg/caiso/<dataset>/`. Partition time-based
 Parquet data by year and month; use a daily partition only when it avoids tiny files.
 
 ```text
@@ -28,8 +32,11 @@ data/
 ├── state/                       # Job checkpoints and manifests
 └── lake/
     ├── power_gas/
-    │   ├── nodal_prices/
-    │   └── load/
+    │   ├── napg/
+    │   │   └── caiso/
+    │   │       ├── dam_lmp/
+    │   │       └── dam_load_forecast/
+    │   └── eupg/
     ├── weather/
     │   └── forecasts/
     ├── oil/
@@ -53,13 +60,15 @@ three-day SP15 day-ahead price sample:
 ```bash
 python -m venv .venv
 .venv/bin/python -m pip install -e .
-.venv/bin/python -m comm_research.markets.power_gas.napg.caiso.caiso_oasis_pipeline \
+.venv/bin/python -m comm_research.markets.power_gas.napg.caiso.pipelines.oasis \
   --categories prices --datasets dam_lmp --nodes TH_SP15_GEN-APND \
   --start 2026-10-01 --end 2026-10-04
 ```
 
-See [OASIS usage and data fields](docs/caiso_oasis.md) for `run()` configuration,
-retention/publication limits, recovery, storage, and the report catalog.
+See [OASIS usage and data fields](docs/markets/power_gas/napg/caiso/caiso_oasis.md) for `run()` configuration,
+retention/publication limits, recovery, storage, and the report catalog. The
+[ingestion notebook](notebooks/markets/power_gas/napg/caiso/caiso_oasis_ingestion.ipynb)
+uses the same pipeline; previous notebook paths remain available as links.
 
 ## Desk dashboard
 
@@ -74,7 +83,7 @@ and a dockable workspace:
 The workstation uses port **8000**. CAISO prices preload into in-memory DuckDB
 at startup; node histories are cached in the browser for local range selection,
 zoom, pan, and component visibility. Use `--lake /path/to/lake` or `--port` to
-choose another lake or port. See [CAISO workstation](docs/caiso_workstation.md).
+choose another lake or port. See [CAISO workstation](docs/markets/power_gas/napg/caiso/caiso_workstation.md).
 The general-purpose Polars dashboard remains available with `python app.py`
 on port 8502; see [generic analytics](docs/dashboard.md).
 
@@ -109,4 +118,4 @@ Crush spreads and crop progress, satelite models
 ![Soybean harvest](assets/markets/soybeans.jpg)
 
 For focused DAM/RTM/FMM backfills, use `python scripts/fetch_caiso.py --help`; see
-[the CLI guide](docs/fetch_caiso.md) for inclusive dates, node selection and refresh behavior.
+[the CLI guide](docs/markets/power_gas/napg/caiso/fetch_caiso.md) for inclusive dates, node selection and refresh behavior.
