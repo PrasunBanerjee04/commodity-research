@@ -19,7 +19,10 @@ from urllib.request import urlopen
 import uvicorn
 
 from comm_research.dashboard.server import create_app
-from tests.test_research_lake import write_outage_fixture, write_research_fixture
+from tests.markets.power_gas.napg.caiso.test_research_lake import (
+    write_outage_fixture,
+    write_research_fixture,
+)
 
 
 @unittest.skipUnless(
@@ -228,7 +231,7 @@ class ResearchBrowserTests(unittest.TestCase):
         # current document must never import this URL, even indirectly.
         stale_hits = []
         self.page.route(
-            "**/src/research_history.js",
+            "**/src/markets/power_gas/napg/caiso/research_history.js",
             lambda route: (
                 stale_hits.append(route.request.url),
                 route.fulfill(
@@ -252,7 +255,8 @@ class ResearchBrowserTests(unittest.TestCase):
         self.assertEqual(stale_hits, [])
         self.assertTrue(
             any(
-                "/src/research_history.js?v=" in item["name"]
+                "/src/markets/power_gas/napg/caiso/research_history.js?v="
+                in item["name"]
                 for item in self.page.evaluate(
                     "performance.getEntriesByType('resource').map(item=>({name:item.name}))"
                 )
@@ -263,9 +267,15 @@ class ResearchBrowserTests(unittest.TestCase):
             document = response.read().decode()
             version = response.headers["X-Frontend-Version"]
             self.assertIn("must-revalidate", response.headers["Cache-Control"])
-            self.assertIn(f"/src/research_history.js?v={version}", document)
+            self.assertIn(
+                f"/src/markets/power_gas/napg/caiso/research_history.js?v={version}",
+                document,
+            )
             self.assertIn('type="importmap"', document)
-        with urlopen(self.url + f"/src/research_history.js?v={version}") as response:
+        with urlopen(
+            self.url
+            + f"/src/markets/power_gas/napg/caiso/research_history.js?v={version}"
+        ) as response:
             self.assertIn("must-revalidate", response.headers["Cache-Control"])
 
     def test_as_stack_totals_legend_rebase_and_resize(self):

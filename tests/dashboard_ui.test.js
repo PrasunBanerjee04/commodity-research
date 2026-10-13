@@ -125,7 +125,7 @@ test('a malformed successful response produces a clear data error', async () => 
   } finally { global.fetch = original; }
 });
 
-const {prepareHistory, displayData, COMPONENTS} = await import('../src/comm_research/dashboard/ui/src/node_history.js');
+const {prepareHistory, displayData, COMPONENTS} = await import('../src/comm_research/dashboard/ui/src/markets/power_gas/napg/caiso/node_history.js');
 test('complete CAISO history retains exact prices while bounding every local display', () => {
   const count = 100000;
   const payload = {node:'NP15',timestamps:Array.from({length:count},(_,i)=>new Date(Date.UTC(2020,0,1)+i*300000).toISOString())};
@@ -150,7 +150,7 @@ test('malformed complete history cannot poison local canvas sampling', () => {
   assert.throws(()=>prepareHistory({timestamps:[],lmp:[1],energy:[],congestion:[],loss:[]}));
 });
 
-const {prepareTrace,sampleTrace,stackTraces}=await import('../src/comm_research/dashboard/ui/src/research_history.js');
+const {prepareTrace,sampleTrace,stackTraces}=await import('../src/comm_research/dashboard/ui/src/markets/power_gas/napg/caiso/research_history.js');
 test('research display preserves extrema and exact nulls within its point budget',()=>{
   const timestamps=Array.from({length:10000},(_,i)=>new Date(Date.UTC(2023,0,1)+i*300000).toISOString());
   const values=timestamps.map((_,i)=>i===1234?10000:Math.sin(i));values[100]=null;
@@ -171,7 +171,7 @@ test('AS stacking rebases isolated services and does not fabricate missing MW',(
   assert.deepEqual(stackTraces([ru],nr.epochs[0],nr.epochs.at(-1))[0].y,[20,null]);
 });
 
-const { prepareOutageTrace, outageBounds, outagePoints } = await import('../src/comm_research/dashboard/ui/src/outage_history.js');
+const { prepareOutageTrace, outageBounds, outagePoints } = await import('../src/comm_research/dashboard/ui/src/markets/power_gas/napg/caiso/outage_history.js');
 test('outage windows overlap locally, retain coincident records and never interpolate gaps', () => {
   const trace = prepareOutageTrace({ dimensions: {ti_direction:'I',record_status:'V'}, events: [
     {start:'2029-01-01T00:00:00Z',end:'2029-01-05T00:00:00Z',value:17,equipment:'A',notes:'<line>'},
@@ -197,7 +197,7 @@ test('outage display ceiling preserves individual event values with a visible co
   assert.equal(points.y[0],0); assert.equal(points.y.at(-2),999);
 });
 
-const { prepareResearchHistory, clearResearchHistories, loadResearchHistory } = await import('../src/comm_research/dashboard/ui/src/research_history.js');
+const { prepareResearchHistory, clearResearchHistories, loadResearchHistory } = await import('../src/comm_research/dashboard/ui/src/markets/power_gas/napg/caiso/research_history.js');
 test('outage parsing recognizes interval shape when the kind tag is absent', () => {
   const series = [{dimensions:{ti_direction:'I',record_status:'V'},events:[{
     start:'2029-01-01T00:00:00Z',end:'2029-01-05T00:00:00Z',value:17,

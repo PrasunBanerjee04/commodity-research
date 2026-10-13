@@ -1,6 +1,6 @@
 import { ChartPanel } from "./chart_panel.js";
-import { CaisoPanel } from "./caiso_panel.js";
-import { ResearchPanel } from "./research_panel.js";
+import { CaisoPanel } from "./markets/power_gas/napg/caiso/caiso_panel.js";
+import { ResearchPanel } from "./markets/power_gas/napg/caiso/research_panel.js";
 
 export function canonicalDatasetPath(key) {
   const parts = String(key).replaceAll("\\", "/").split("/").filter(part => part && part !== ".");

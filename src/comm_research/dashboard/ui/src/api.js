@@ -1,8 +1,8 @@
 import { request } from "./http.js";
 export { request } from "./http.js";
 import { clearQueryCaches } from "./query_cache.js";
-import { clearNodeHistories } from "./node_history.js";
-import { clearResearchHistories } from "./research_history.js";
+import { clearNodeHistories } from "./markets/power_gas/napg/caiso/node_history.js";
+import { clearResearchHistories } from "./markets/power_gas/napg/caiso/research_history.js";
 
 const lookups = new Map();
 

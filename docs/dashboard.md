@@ -1,7 +1,7 @@
 # Commodities desk dashboard
 
 For the preloaded DuckDB CAISO workstation (`python server.py`, port 8000), see
-[CAISO workstation](caiso_workstation.md). This page describes the generic
+[CAISO workstation](markets/power_gas/napg/caiso/caiso_workstation.md). This page describes the generic
 Polars dashboard and its bounded `/api/series` API on port 8502.
 
 From the repository root:
@@ -44,7 +44,7 @@ Wheel zoom centers on the cursor; **Shift+drag** pans time. Double-click or
 **RESET** restores the selected date window and automatic value scale while
 retaining signals and filters. These gestures operate on the browser cache and
 leave the other panes' ranges unchanged. The port-8000 workstation additionally
-provides the dedicated interval-based [transmission outage view](caiso_research_views.md).
+provides the dedicated interval-based [transmission outage view](markets/power_gas/napg/caiso/caiso_research_views.md).
 
 ## Signals and analytics
 
