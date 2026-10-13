@@ -17,4 +17,6 @@ where = ["src"]
 include = ["comm_research*"]
 
 [tool.setuptools.package-data]
-"comm_research.dashboard.ui" = ["*.html", "*.css", "*.js", "vendor/*", "styles/*", "src/*"]
+"comm_research.dashboard.ui" = ["*.html", "*.css", "*.js", "vendor/*", "styles/*", "src/*", "src/markets/power_gas/napg/caiso/*.js"]
+
+"*" = [".gitkeep"]

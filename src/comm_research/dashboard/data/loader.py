@@ -22,7 +22,7 @@ from comm_research.dashboard.config.taxonomy import (
     display_name,
     metric_unit,
 )
-from comm_research.infra.tools.caiso_schema import (
+from comm_research.markets.power_gas.napg.caiso.transforms.schema import (
     COMPONENT_ALIASES,
     normalize_schema,
     utc_expression,

@@ -21,8 +21,8 @@ from comm_research.dashboard.data.loader import (
     inspect_dataset,
 )
 from comm_research.dashboard.lake_api import LakeAPI, _dataset_json
+from comm_research.infra.paths import PROJECT_ROOT
 
-PROJECT_ROOT = Path(__file__).resolve().parents[3]
 DEFAULT_LAKE_ROOT = PROJECT_ROOT / "data/lake"
 WEB_ROOT = Path(__file__).resolve().parent / "ui"
 MAX_REQUEST_BYTES = 64_000
