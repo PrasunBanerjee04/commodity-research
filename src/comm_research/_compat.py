@@ -12,11 +12,13 @@ import sys
 from types import ModuleType
 
 CAISO = "comm_research.markets.power_gas.napg.caiso"
+WEATHER = "comm_research.markets.weather"
 ALIASES = {
     "comm_research.infra.scrapers.caiso.oasis.models": CAISO
     + ".scrapers.oasis.reports",
     "comm_research.infra.scrapers.caiso.oasis": CAISO + ".scrapers.oasis",
     "comm_research.infra.scrapers.caiso": CAISO + ".scrapers",
+    "comm_research.infra.scrapers.weather": WEATHER + ".scrapers",
     "comm_research.infra.tools.caiso_normalizer": CAISO + ".transforms.normalizer",
     "comm_research.infra.tools.caiso_schema": CAISO + ".transforms.schema",
     "comm_research.infra.tools.parquet_formatter": "comm_research.infra.lake.parquet",

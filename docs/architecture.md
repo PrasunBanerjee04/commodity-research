@@ -42,6 +42,9 @@ src/comm_research/
 │   ├── oil/
 │   ├── ags/
 │   └── weather/
+│       └── scrapers/
+│           ├── ecmwf.py
+│           └── era5.py
 └── dashboard/
     ├── server.py
     ├── app.py
@@ -79,6 +82,17 @@ helpers. Dashboard routing selects market query adapters, which can use the
 shared dashboard data/catalog interfaces. Market frontend components are grouped
 under the matching taxonomy inside the shared UI asset tree. Compatibility JS
 URLs at the old root locations only re-export the canonical modules.
+
+All scraper modules belong to their market's `scrapers/` package. The weather
+`ecmwf.py` and `era5.py` placeholders live in `markets/weather/scrapers/`;
+there is no physical `infra/scrapers/` directory. Shared HTTP and lake tooling
+remain under `infra/http/` and `infra/lake/`.
+
+Legacy `comm_research.infra.scrapers.weather` imports, including its `ecmwf`
+and `era5` modules, resolve lazily to the same market-owned module objects
+through `_compat.py`. The legacy `infra.scrapers` namespace is virtual, so
+existing imports continue to work without maintaining duplicate scraper files
+or loading market code when shared infrastructure is imported.
 
 ## CAISO imports and entrypoints
 

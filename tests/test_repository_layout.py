@@ -16,6 +16,49 @@ CAISO = "comm_research.markets.power_gas.napg.caiso"
 
 
 class RepositoryLayoutTests(unittest.TestCase):
+    def test_scrapers_are_market_owned_without_a_physical_infra_package(self):
+        self.assertFalse((ROOT / "src/comm_research/infra/scrapers").exists())
+        weather = ROOT / "src/comm_research/markets/weather/scrapers"
+        for name in ("ecmwf", "era5"):
+            with self.subTest(name=name):
+                module = importlib.import_module(
+                    f"comm_research.markets.weather.scrapers.{name}"
+                )
+                self.assertEqual(Path(module.__file__), weather / f"{name}.py")
+
+    def test_weather_legacy_imports_share_modules_in_either_import_order(self):
+        # Fresh interpreters exercise both finder routes without sys.modules
+        # entries left by another test masking a broken legacy import.
+        for first in ("legacy", "canonical"):
+            with self.subTest(first=first):
+                program = f"""
+import importlib
+import json
+
+legacy = 'comm_research.infra.scrapers.weather'
+canonical = 'comm_research.markets.weather.scrapers'
+for suffix in ('', '.ecmwf', '.era5'):
+    names = [legacy + suffix, canonical + suffix]
+    if {first!r} == 'canonical':
+        names.reverse()
+    modules = [importlib.import_module(name) for name in names]
+    assert modules[0] is modules[1], names
+    assert modules[0].__spec__.name == canonical + suffix
+    assert importlib.reload(modules[0]) is modules[1]
+from comm_research.infra.scrapers.weather import ecmwf, era5
+assert ecmwf is importlib.import_module(canonical + '.ecmwf')
+assert era5 is importlib.import_module(canonical + '.era5')
+print(json.dumps([ecmwf.__name__, era5.__name__]))
+"""
+                result = subprocess.run(
+                    [sys.executable, "-c", program], cwd=ROOT,
+                    capture_output=True, text=True, check=True,
+                )
+                self.assertEqual(json.loads(result.stdout), [
+                    "comm_research.markets.weather.scrapers.ecmwf",
+                    "comm_research.markets.weather.scrapers.era5",
+                ])
+
     def test_legacy_aliases_preserve_identity_specs_and_mutable_settings(self):
         from comm_research._compat import ALIASES
 
@@ -76,7 +119,7 @@ class RepositoryLayoutTests(unittest.TestCase):
             [
                 sys.executable,
                 "-c",
-                "import comm_research.common.math, sys, json; print(json.dumps([x for x in ('duckdb','polars','comm_research.markets') if x in sys.modules]))",
+                "import comm_research.common.math, comm_research.infra.scrapers, sys, json; print(json.dumps([x for x in ('duckdb','polars','comm_research.markets') if x in sys.modules]))",
             ],
             cwd=ROOT,
             capture_output=True,
