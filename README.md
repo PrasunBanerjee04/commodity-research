@@ -87,6 +87,15 @@ choose another lake or port. See [CAISO workstation](docs/markets/power_gas/napg
 The general-purpose Polars dashboard remains available with `python app.py`
 on port 8502; see [generic analytics](docs/dashboard.md).
 
+## Regional ERA5 weather
+
+Use [the ERA5 notebook](notebooks/markets/weather/era5_ingestion.ipynb) to define
+a weather grid and pull hourly reanalysis directly from Copernicus CDS into
+`data/lake/weather/era5/year=YYYY/month=MM/day=DD/data.parquet`. Further regional
+pulls merge into the same daily files without duplicating overlapping cells.
+Install `.[weather,notebooks]` and configure your CDS credentials securely.
+See [ERA5 setup and schema](docs/markets/weather/era5.md).
+
 ## Documentation
 
 See [docs/](docs/) for infrastructure and model documentation.
