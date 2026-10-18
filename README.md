@@ -87,6 +87,21 @@ choose another lake or port. See [CAISO workstation](docs/markets/power_gas/napg
 The general-purpose Polars dashboard remains available with `python app.py`
 on port 8502; see [generic analytics](docs/dashboard.md).
 
+## ERA5 weather reanalysis
+
+Download global hourly 2 m temperature into daily Parquet lake partitions:
+
+```bash
+.venv/bin/python -m pip install -e '.[era5]'
+.venv/bin/python src/comm_research/markets/weather/era5.py \
+  --start 2000-01-01 --end 2000-01-02
+```
+
+Running without date flags backfills from 2000 through the mirror's latest
+complete finalized day. Use a larger `--lake` volume for the full history.
+See [ERA5 ingestion](docs/markets/weather/era5.md) for configuration, schema,
+parallel retrieval, and restart behavior.
+
 ## Documentation
 
 See [docs/](docs/) for infrastructure and model documentation.
