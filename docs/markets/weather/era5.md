@@ -38,7 +38,9 @@ Edit the labeled global settings in the first code cell:
 - `NORTH`, `WEST`, `SOUTH`, `EAST`, and `REGION_NAME` define a rectangular region.
 - `START_DATE` is inclusive; `END_DATE` is exclusive. Dates are **UTC**.
 - `VARIABLES` defaults to `("2m_temperature",)`.
-- `WORKERS` bounds concurrent CDS requests; start with two.
+- `WORKERS` bounds concurrent CDS requests across dates and the number of
+  active daily batches. Two is the default; try four if CDS limits and memory
+  permit. One uses sequential retrieval.
 - `LAKE_ROOT` and `RAW_ROOT` optionally override the default directories.
 - `REFRESH` forces fresh retrieval for the requested region/dates/variables.
 - `KEEP_RAW` retains successful NetCDF downloads when enabled.
@@ -129,8 +131,17 @@ archive. Do not assume it was available at the original valid time.
 
 ## Reliability and limits
 
-The scraper uses bounded concurrent CDS clients with TLS verification enabled.
-NetCDF decoding is serialized because the netCDF4/HDF5 library is not
+The scraper schedules requests round-robin across a bounded window of dates.
+Even a temperature-only pull for one region can retrieve several dates at once.
+Each request owns its CDS client and HTTP session, with TLS verification enabled.
+There are at most `WORKERS` requests in flight and at most `WORKERS` active daily
+batches; the entire history is never queued. Network retrieval continues while
+the coordinator validates and writes completed dates. A slow earlier date does
+not prevent a later complete date from being published.
+
+Only the calling/coordinator thread merges and writes Parquet. All variables
+and antimeridian areas for a date must finish before its file is updated, once
+per run. NetCDF decoding is serialized because the netCDF4/HDF5 library is not
 thread-safe. Source files must contain every requested cell and all 24 hourly
 UTC timestamps for the day; missing/nonfinite values, conflicting duplicates,
 unexpected units within a variable, and incompatible existing schemas fail
@@ -143,10 +154,26 @@ failed batch they can be reused on retry. Successful raw files are deleted only
 after the daily merge succeeds, unless `KEEP_RAW` is enabled. Refresh downloads
 fresh responses and preserves existing lake files if retrieval fails.
 
-Atomicity is per day, not across an entire backfill. Each day and its existing
-combined partition must fit in memory for the merge. Begin with regional
-requests; this implementation is not intended to materialize the entire globe
-in a single in-memory daily table. Interrupting a queued CDS job can require
+When the coordinator detects a failure or interruption, it stops submitting
+requests and cancels queued work. Already-running requests finish and cache
+validated responses before the executor exits and the lake/raw locks are released. Workers never
+publish Parquet. A second notebook or process using the same lake or raw cache
+fails fast on its writer lock rather than racing with the first run.
+
+To update an existing notebook, pull the branch and restart its kernel so it
+imports the new scraper. Its existing `WORKERS` setting now controls cross-date
+parallelism; no notebook API changes are required. Stop the previous pull first,
+then rerun the original date range with `REFRESH = False`. Completed dates skip
+automatically, and cached responses from unfinished days are reused. Dates can
+finish out of order, so resume the original range rather than advancing the
+start date to the last log message. Actual throughput depends on CDS queue,
+account concurrency limits, network bandwidth, and local processing.
+
+Atomicity is per day, not across an entire backfill. Up to `WORKERS` active
+daily batches, their decoded responses, and existing combined partitions may
+be held in memory. Reduce `WORKERS` for large regions or many variables. Begin
+with regional requests; this implementation is not intended to materialize the
+entire globe in a single in-memory daily table. Interrupting a queued CDS job can require
 resubmission; only completed local downloads and lake partitions are resumed.
 Recent days may not yet be available at CDS and may later be revised.
 
@@ -158,5 +185,8 @@ Recent days may not yet be available at CDS and may later be revised.
 
 Tests use real NetCDF fixtures and exercise UTC dates, overlapping/disjoint
 regions, new variables, antimeridian cells, recovery, finalized/preliminary
-fields, locks, and failed writes. A live CDS download additionally requires the
+fields, locks, and failed writes. Event-coordinated tests also verify concurrent
+dates, bounded lookahead, out-of-order completion, one coordinator writing each
+date, and retention of locks/raw data while parallel downloads finish after a
+failure. A live CDS download additionally requires the
 user's account token and accepted dataset terms.

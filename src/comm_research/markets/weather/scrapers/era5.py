@@ -12,8 +12,9 @@ import logging
 import os
 import tempfile
 import zipfile
-from concurrent.futures import ThreadPoolExecutor
-from dataclasses import dataclass
+from collections import deque
+from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
+from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from threading import Lock
@@ -180,8 +181,17 @@ class RunSummary:
     received_rows: int = 0
 
 
+@dataclass
+class _DayBatch:
+    day: date
+    existing: pl.DataFrame | None
+    jobs: deque
+    remaining: int
+    results: list = field(default_factory=list)
+
+
 class ERA5Scraper:
-    """Pull a WeatherGrid from CDS and upsert it into shared daily Parquet."""
+    """Fetch dates concurrently; one coordinator merges shared daily Parquet."""
 
     def __init__(
         self, grid: WeatherGrid, *, variables=("2m_temperature",),
@@ -208,13 +218,17 @@ class ERA5Scraper:
     def _client():
         try:
             import cdsapi
+            import requests
         except ImportError as error:
             raise RuntimeError("Install weather dependencies: python -m pip install -e '.[weather]'") from error
 
+        session = requests.Session()
         try:
             return cdsapi.Client(url=CDS_URL, quiet=True, progress=False,
-                                 timeout=120, retry_max=5, sleep_max=60, verify=True)
+                                 timeout=120, retry_max=5, sleep_max=60, verify=True,
+                                 session=session)
         except Exception as error:
+            session.close()
             raise RuntimeError(
                 "Configure CDSAPI_KEY securely in the environment or ~/.cdsapirc, "
                 "and accept the ERA5 dataset terms in your CDS account."
@@ -237,7 +251,13 @@ class ERA5Scraper:
             try:
                 with tempfile.NamedTemporaryFile(dir=target.parent, suffix=".partial", delete=False) as stream:
                     temporary = Path(stream.name)
-                self.client_factory().retrieve(DATASET, request, str(temporary))
+                client = self.client_factory()
+                try:
+                    client.retrieve(DATASET, request, str(temporary))
+                finally:
+                    session = getattr(client, "session", None)
+                    if session is not None:
+                        session.close()
                 # Validate before allowing a cached response to be reused.
                 frame = _normalize(temporary, variable, area, day)
                 os.replace(temporary, target)
@@ -254,6 +274,8 @@ class ERA5Scraper:
 
         Refresh bypasses the lake completeness check and cached CDS responses.
         No request is silently clamped to provider availability.
+        ``workers`` bounds both in-flight requests and active daily batches.
+        Only the calling thread writes Parquet; dates may finish out of order.
         """
         if (not isinstance(start, date) or isinstance(start, datetime)
                 or not isinstance(end, date) or isinstance(end, datetime)
@@ -264,42 +286,93 @@ class ERA5Scraper:
         if self.raw_root == self.lake_root:
             raise ValueError("raw_root and lake_root must be different directories")
         with writer_lock(self.raw_root), writer_lock(self.lake_root), ThreadPoolExecutor(max_workers=self.workers) as executor:
-            day = start
-            while day < end:
-                target = _partition(self.lake_root, day)
-                existing = pl.read_parquet(target, hive_partitioning=False) if target.exists() else None
-                if existing is not None:
-                    _validate(existing, day)
-                    if not refresh and _complete(existing, self.grid, self.variables):
-                        summary.skipped_days += 1
-                        logger.info("SKIP %s: all requested grid observations already present", day)
-                        day += timedelta(days=1)
-                        continue
-                jobs = [(day, variable, area, refresh) for variable in self.variables for area in self.grid.cds_areas]
-                logger.info("FETCH %s: %s, %d CDS requests", day, self.grid.name, len(jobs))
-                results = list(executor.map(lambda args: self._fetch(*args), jobs))
-                incoming = pl.concat([result[0] for result in results])
-                # Antimeridian requests can both return the +/-180 boundary.
-                conflicts = incoming.group_by(KEYS).agg(
-                    pl.col("value").n_unique().alias("values"),
-                    pl.col("unit").n_unique().alias("units"),
-                ).filter((pl.col("values") != 1) | (pl.col("units") != 1))
-                if conflicts.height:
-                    raise ValueError("Conflicting observations in the same CDS response batch")
-                incoming = incoming.unique(subset=KEYS, keep="last")
-                _validate(incoming, day)
-                if not _complete(incoming, self.grid, self.variables):
-                    raise ValueError("Incomplete ERA5 grid coverage; daily partition was not changed")
-                merged = pl.concat([existing, incoming]) if existing is not None else incoming
-                merged = merged.unique(subset=KEYS, keep="last").sort(KEYS)
-                _validate(merged, day)
-                write_atomic(merged, target)
-                if not self.keep_raw:
-                    for _, raw, _ in results:
-                        raw.unlink(missing_ok=True)
-                summary.downloaded_requests += sum(result[2] for result in results)
-                summary.written_days += 1
-                summary.received_rows += incoming.height
-                logger.info("SAVED %s: %d incoming rows; %d total rows", day, incoming.height, merged.height)
-                day += timedelta(days=1)
+            plans = self._plan_days(start, end, refresh, summary)
+            batches = {}
+            ready = deque()
+            pending = {}
+            exhausted = False
+
+            def fill_window():
+                nonlocal exhausted
+                # Do not enqueue the entire history or retain unbounded frames.
+                while not exhausted and len(batches) < self.workers:
+                    batch = next(plans, None)
+                    if batch is None:
+                        exhausted = True
+                        break
+                    batches[batch.day] = batch
+                    ready.append(batch.day)
+                # Round-robin requests across dates, including when each day
+                # contains multiple variables or antimeridian areas.
+                while ready and len(pending) < self.workers:
+                    day = ready.popleft()
+                    batch = batches[day]
+                    variable, area = batch.jobs.popleft()
+                    pending[executor.submit(self._fetch, day, variable, area, refresh)] = day
+                    if batch.jobs:
+                        ready.append(day)
+
+            try:
+                fill_window()
+                while pending:
+                    done, _ = wait(pending, return_when=FIRST_COMPLETED)
+                    for future in sorted(done, key=pending.__getitem__):
+                        day = pending.pop(future)
+                        batch = batches[day]
+                        batch.results.append(future.result())
+                        batch.remaining -= 1
+                        if batch.remaining == 0:
+                            self._merge_day(batch, summary)
+                            del batches[day]
+                    fill_window()
+            finally:
+                # Queued jobs are cancelled on failure/interruption. Running
+                # requests finish/cache before the executor exits and the file
+                # locks are released; workers never publish Parquet files.
+                for future in pending:
+                    future.cancel()
         return summary
+
+    def _plan_days(self, start, end, refresh, summary):
+        day = start
+        while day < end:
+            target = _partition(self.lake_root, day)
+            existing = pl.read_parquet(target, hive_partitioning=False) if target.exists() else None
+            if existing is not None:
+                _validate(existing, day)
+                if not refresh and _complete(existing, self.grid, self.variables):
+                    summary.skipped_days += 1
+                    logger.info("SKIP %s: all requested grid observations already present", day)
+                    day += timedelta(days=1)
+                    continue
+            jobs = deque((variable, area) for variable in self.variables for area in self.grid.cds_areas)
+            logger.info("FETCH %s: %s, %d CDS requests", day, self.grid.name, len(jobs))
+            yield _DayBatch(day, existing, jobs, len(jobs))
+            day += timedelta(days=1)
+
+    def _merge_day(self, batch, summary):
+        # Called exclusively by the coordinator under the lake writer lock.
+        day, existing, results = batch.day, batch.existing, batch.results
+        incoming = pl.concat([result[0] for result in results])
+        # Antimeridian requests can both return the +/-180 boundary.
+        conflicts = incoming.group_by(KEYS).agg(
+            pl.col("value").n_unique().alias("values"),
+            pl.col("unit").n_unique().alias("units"),
+        ).filter((pl.col("values") != 1) | (pl.col("units") != 1))
+        if conflicts.height:
+            raise ValueError("Conflicting observations in the same CDS response batch")
+        incoming = incoming.unique(subset=KEYS, keep="last")
+        _validate(incoming, day)
+        if not _complete(incoming, self.grid, self.variables):
+            raise ValueError("Incomplete ERA5 grid coverage; daily partition was not changed")
+        merged = pl.concat([existing, incoming]) if existing is not None else incoming
+        merged = merged.unique(subset=KEYS, keep="last").sort(KEYS)
+        _validate(merged, day)
+        write_atomic(merged, _partition(self.lake_root, day))
+        if not self.keep_raw:
+            for _, raw, _ in results:
+                raw.unlink(missing_ok=True)
+        summary.downloaded_requests += sum(result[2] for result in results)
+        summary.written_days += 1
+        summary.received_rows += incoming.height
+        logger.info("SAVED %s: %d incoming rows; %d total rows", day, incoming.height, merged.height)
