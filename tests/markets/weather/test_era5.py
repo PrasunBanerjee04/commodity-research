@@ -8,7 +8,7 @@ import time
 import unittest
 from datetime import date, datetime, timedelta
 from pathlib import Path
-from threading import Lock
+from threading import Event, Lock, get_ident
 from unittest.mock import patch
 
 import polars as pl
@@ -421,6 +421,200 @@ class ERA5Tests(unittest.TestCase):
         self.assertEqual(len([cell for cell in notebook.cells if cell.cell_type == "code"]), 2)
         self.assertEqual(namespace['summary'].written_days, 1)
         self.assertEqual(self.read().height, 96)
+
+    def test_dates_download_concurrently_with_only_one_coordinator_writing(self):
+        workers = 3
+        all_started = Event()
+        guard = Lock()
+        active = peak = 0
+        dates = set()
+        writes = []
+        coordinator = get_ident()
+        fixture_client = self.client_factory
+        real_write = era5.write_atomic
+
+        class ConcurrentClient:
+            def retrieve(self, dataset, request, target):
+                nonlocal active, peak
+                with guard:
+                    active += 1
+                    peak = max(peak, active)
+                    dates.add(tuple(request[key][0] for key in ('year', 'month', 'day')))
+                    if active == workers:
+                        all_started.set()
+                try:
+                    if not all_started.wait(timeout=10):
+                        raise RuntimeError('Dates were not downloaded concurrently')
+                    fixture_client().retrieve(dataset, request, target)
+                finally:
+                    with guard:
+                        active -= 1
+
+        def write(frame, target):
+            self.assertEqual(get_ident(), coordinator)
+            writes.append(target)
+            real_write(frame, target)
+
+        self.client_factory = ConcurrentClient
+        with patch.object(era5, 'write_atomic', side_effect=write):
+            result = self.scraper(workers=workers).run(self.day, date(2000, 1, 4))
+        self.assertEqual(peak, workers)
+        self.assertEqual(len(dates), workers)
+        self.assertEqual(result.written_days, workers)
+        self.assertEqual(len(writes), len(set(writes)))
+
+    def test_fast_date_is_published_before_slow_earlier_date_finishes(self):
+        later_written = Event()
+        fixture_client = self.client_factory
+        real_write = era5.write_atomic
+        written = []
+
+        class DelayedClient:
+            def retrieve(self, dataset, request, target):
+                if request['day'] == ['01'] and not later_written.wait(timeout=10):
+                    raise RuntimeError('A slow date blocked the completed later date')
+                fixture_client().retrieve(dataset, request, target)
+
+        def write(frame, target):
+            real_write(frame, target)
+            written.append(target.parent.name)
+            if target.parent.name == 'day=02':
+                later_written.set()
+
+        self.client_factory = DelayedClient
+        with patch.object(era5, 'write_atomic', side_effect=write):
+            result = self.scraper(workers=2).run(self.day, date(2000, 1, 3))
+        self.assertEqual(result.written_days, 2)
+        self.assertEqual(written, ['day=02', 'day=01'])
+
+    def test_scheduler_limits_lookahead_until_a_day_is_published(self):
+        # The first day needs two variables. Both must be attempted within the
+        # active two-day window before any request for a third day is allowed.
+        release = Event()
+        guard = Lock()
+        started = []
+        active = peak = 0
+        published = []
+        fixture_client = self.client_factory
+        real_write = era5.write_atomic
+
+        class WindowClient:
+            def retrieve(self, dataset, request, target):
+                nonlocal active, peak
+                with guard:
+                    active += 1
+                    peak = max(peak, active)
+                    started.append((request['day'][0], request['variable'][0]))
+                    if len(started) == 2:
+                        release.set()
+                    if not published and request['day'][0] not in ('01', '02'):
+                        raise RuntimeError('Unbounded date lookahead')
+                try:
+                    if not release.wait(timeout=10):
+                        raise RuntimeError('Initial date window did not start')
+                    fixture_client().retrieve(dataset, request, target)
+                finally:
+                    with guard:
+                        active -= 1
+
+        def write(frame, target):
+            real_write(frame, target)
+            with guard:
+                published.append(target)
+
+        self.client_factory = WindowClient
+        with patch.object(era5, 'write_atomic', side_effect=write):
+            result = self.scraper(workers=2, variables=('2m_temperature', '2m_dewpoint_temperature')).run(
+                self.day, date(2000, 1, 8)
+            )
+        self.assertLessEqual(peak, 2)
+        self.assertEqual(len(started), 14)
+        self.assertEqual(result.written_days, 7)
+        self.assertEqual(len(published), 7)
+
+    def test_skipped_days_do_not_occupy_download_window(self):
+        self.scraper().run(self.day, date(2000, 1, 4))
+        era5._partition(self.root/'lake', date(2000, 1, 2)).unlink()
+        self.calls.clear()
+        result = self.scraper(workers=4).run(self.day, date(2000, 1, 4))
+        self.assertEqual((result.written_days, result.skipped_days), (1, 2))
+        self.assertEqual([request['day'] for _, request in self.calls], [['02']])
+
+    def test_failure_does_not_enqueue_the_rest_of_history(self):
+        self.fail_variable = '2m_temperature'
+        with self.assertRaisesRegex(RuntimeError, 'CDS unavailable'):
+            self.scraper(workers=1).run(self.day, date(2000, 2, 1))
+        self.assertEqual(len(self.calls), 1)
+        self.assertEqual(list((self.root/'lake').rglob('*.parquet')), [])
+
+    def test_parallel_failure_keeps_locks_until_running_download_is_cached(self):
+        from concurrent.futures import ThreadPoolExecutor
+        from comm_research.infra.lake.writer_lock import writer_lock
+
+        second_started = Event()
+        failure_started = Event()
+        release_second = Event()
+        fixture_client = self.client_factory
+
+        class FailingClient:
+            def retrieve(self, dataset, request, target):
+                if request['day'] == ['01']:
+                    if not second_started.wait(timeout=10):
+                        raise RuntimeError('Second date did not start')
+                    failure_started.set()
+                    raise RuntimeError('First date failed')
+                second_started.set()
+                if not release_second.wait(timeout=10):
+                    raise RuntimeError('Running download was not released')
+                fixture_client().retrieve(dataset, request, target)
+
+        self.client_factory = FailingClient
+        with ThreadPoolExecutor(max_workers=1) as caller:
+            result = caller.submit(self.scraper(workers=2).run, self.day, date(2000, 2, 1))
+            try:
+                self.assertTrue(failure_started.wait(timeout=10))
+                self.assertFalse(result.done())
+                for root in (self.root/'lake', self.root/'raw'):
+                    with self.assertRaisesRegex(RuntimeError, 'Another writer'):
+                        with writer_lock(root):
+                            pass
+            finally:
+                release_second.set()
+            with self.assertRaisesRegex(RuntimeError, 'First date failed'):
+                result.result(timeout=10)
+        self.assertEqual(list((self.root/'lake').rglob('*.parquet')), [])
+        self.assertEqual(len(list((self.root/'raw').rglob('*.nc'))), 1)
+        self.assertEqual(list((self.root/'raw').rglob('*.partial')), [])
+        self.client_factory = fixture_client
+        retry = self.scraper(workers=2).run(self.day, date(2000, 1, 3))
+        self.assertEqual((retry.downloaded_requests, retry.written_days), (1, 2))
+
+    def test_lake_lock_prevents_a_second_writer_and_releases_raw_lock(self):
+        from comm_research.infra.lake.writer_lock import writer_lock
+
+        with writer_lock(self.root/'lake'):
+            with self.assertRaisesRegex(RuntimeError, 'Another writer'):
+                self.scraper(workers=4).run(self.day, self.end)
+        self.assertEqual(self.scraper().run(self.day, self.end).written_days, 1)
+
+    def test_each_cds_client_owns_a_separate_verified_http_session(self):
+        if not importlib.util.find_spec('cdsapi'):
+            self.skipTest('Install cdsapi to check session ownership')
+        sessions = []
+
+        def create_client(**kwargs):
+            self.assertTrue(kwargs['verify'])
+            sessions.append(kwargs['session'])
+            return object()
+
+        try:
+            with patch('cdsapi.Client', side_effect=create_client):
+                era5.ERA5Scraper._client()
+                era5.ERA5Scraper._client()
+            self.assertIsNot(sessions[0], sessions[1])
+        finally:
+            for session in sessions:
+                session.close()
 
 
 if __name__ == '__main__':

@@ -45,6 +45,16 @@ Edit the global settings in the first code cell:
 - `LAKE_ROOT` optionally overrides the default lake directory.
 - `REFRESH` forces retrieval for days that are already complete.
 
+CDS retrieval details:
+
+- `WORKERS` bounds concurrent CDS requests across dates and the number of
+  active daily batches. Two is the default; try four if CDS limits and memory
+  permit. One uses sequential retrieval.
+- `LAKE_ROOT` and `RAW_ROOT` optionally override the default directories.
+- `REFRESH` forces fresh retrieval for the requested region/dates/variables.
+- `KEEP_RAW` retains successful NetCDF downloads when enabled.
+- `RUN_DOWNLOAD` starts as `False`; set it to `True` after checking the settings.
+
 Run the two code cells in order. To resume an interrupted backfill, keep the
 same region, variables, and date interval: already-complete days are skipped,
 and incomplete days are fetched again. Start with a short interval before a
@@ -156,6 +166,24 @@ missing/nonfinite values, conflicting duplicates, unexpected units within a
 variable, and incompatible existing schemas fail before a daily file is
 replaced.
 
+CDS retrieval details:
+
+The scraper schedules requests round-robin across a bounded window of dates.
+Even a temperature-only pull for one region can retrieve several dates at once.
+Each request owns its CDS client and HTTP session, with TLS verification enabled.
+There are at most `WORKERS` requests in flight and at most `WORKERS` active daily
+batches; the entire history is never queued. Network retrieval continues while
+the coordinator validates and writes completed dates. A slow earlier date does
+not prevent a later complete date from being published.
+
+Only the calling/coordinator thread merges and writes Parquet. All variables
+and antimeridian areas for a date must finish before its file is updated, once
+per run. NetCDF decoding is serialized because the netCDF4/HDF5 library is not
+thread-safe. Source files must contain every requested cell and all 24 hourly
+UTC timestamps for the day; missing/nonfinite values, conflicting duplicates,
+unexpected units within a variable, and incompatible existing schemas fail
+before a daily file is replaced.
+
 The existing writer-lock and atomic-Parquet helpers protect the merge. Runs
 sharing a lake or raw cache cannot write concurrently. Completed days survive
 later failures. Validated raw responses are cached by exact request; after a
@@ -163,10 +191,26 @@ failed batch they can be reused on retry. Successful raw files are deleted only
 after the daily merge succeeds, unless `KEEP_RAW` is enabled. Refresh downloads
 fresh responses and preserves existing lake files if retrieval fails.
 
-Atomicity is per day, not across an entire backfill. Each day and its existing
-combined partition must fit in memory for the merge. Begin with regional
-requests; this implementation is not intended to materialize the entire globe
-in a single in-memory daily table. Interrupting a queued CDS job can require
+When the coordinator detects a failure or interruption, it stops submitting
+requests and cancels queued work. Already-running requests finish and cache
+validated responses before the executor exits and the lake/raw locks are released. Workers never
+publish Parquet. A second notebook or process using the same lake or raw cache
+fails fast on its writer lock rather than racing with the first run.
+
+To update an existing notebook, pull the branch and restart its kernel so it
+imports the new scraper. Its existing `WORKERS` setting now controls cross-date
+parallelism; no notebook API changes are required. Stop the previous pull first,
+then rerun the original date range with `REFRESH = False`. Completed dates skip
+automatically, and cached responses from unfinished days are reused. Dates can
+finish out of order, so resume the original range rather than advancing the
+start date to the last log message. Actual throughput depends on CDS queue,
+account concurrency limits, network bandwidth, and local processing.
+
+Atomicity is per day, not across an entire backfill. Up to `WORKERS` active
+daily batches, their decoded responses, and existing combined partitions may
+be held in memory. Reduce `WORKERS` for large regions or many variables. Begin
+with regional requests; this implementation is not intended to materialize the
+entire globe in a single in-memory daily table. Interrupting a queued CDS job can require
 resubmission; only completed local downloads and lake partitions are resumed.
 Recent days may not yet be available at CDS and may later be revised.
 
@@ -178,5 +222,8 @@ Recent days may not yet be available at CDS and may later be revised.
 
 Tests use real NetCDF fixtures and exercise UTC dates, overlapping/disjoint
 regions, new variables, antimeridian cells, recovery, finalized/preliminary
-fields, locks, and failed writes. A live CDS download additionally requires the
+fields, locks, and failed writes. Event-coordinated tests also verify concurrent
+dates, bounded lookahead, out-of-order completion, one coordinator writing each
+date, and retention of locks/raw data while parallel downloads finish after a
+failure. A live CDS download additionally requires the
 user's account token and accepted dataset terms.
