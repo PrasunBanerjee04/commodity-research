@@ -1,9 +1,10 @@
-# Regional ERA5 from Copernicus CDS
+# Regional ERA5 ingestion
 
-Use [the ingestion notebook](../../../notebooks/markets/weather/era5_ingestion.ipynb)
-to request ERA5 hourly single-level reanalysis from the
+Use [the ingestion notebook](../../../notebooks/era5_ingestion.ipynb) to bulk
+ingest ERA5 hourly single-level reanalysis from the public ARCO Zarr mirror on
+Google Cloud Storage. The default variable is **2 m temperature**. The Python
+API also supports requests directly from the
 [Copernicus Climate Data Store](https://cds.climate.copernicus.eu/datasets/reanalysis-era5-single-levels).
-The default variable is **2 m temperature**. Nothing is downloaded from a mirror.
 
 ## Setup
 
@@ -14,9 +15,11 @@ From the repository root:
 ```
 
 Select this repository's `.venv` Python interpreter as the notebook kernel.
-Register a CDS account, accept the ERA5 single-level dataset terms through the
-CDS download page, and configure the account's personal access token securely.
-The scraper uses the official `cdsapi` client and its supported configuration:
+The notebook accesses the public Zarr mirror anonymously and does not require
+CDS credentials. For direct CDS requests through `ERA5Scraper.run`, register a
+CDS account, accept the ERA5 single-level dataset terms, and configure the
+account's personal access token securely. The scraper uses the official
+`cdsapi` client and its supported configuration:
 
 - `CDSAPI_KEY` in environment settings; the URL is fixed to the current
   `https://cds.climate.copernicus.eu/api` endpoint.
@@ -33,22 +36,20 @@ if CDS returns a different host, permit that specific destination in settings.
 
 ## Notebook workflow
 
-Edit the labeled global settings in the first code cell:
+Edit the global settings in the first code cell:
 
 - `NORTH`, `WEST`, `SOUTH`, `EAST`, and `REGION_NAME` define a rectangular region.
 - `START_DATE` is inclusive; `END_DATE` is exclusive. Dates are **UTC**.
 - `VARIABLES` defaults to `("2m_temperature",)`.
-- `WORKERS` bounds concurrent CDS requests; start with two.
-- `LAKE_ROOT` and `RAW_ROOT` optionally override the default directories.
-- `REFRESH` forces fresh retrieval for the requested region/dates/variables.
-- `KEEP_RAW` retains successful NetCDF downloads when enabled.
-- `RUN_DOWNLOAD` starts as `False`; set it to `True` after checking the settings.
+- `WORKERS` bounds concurrent day reads from the public Zarr store; start small.
+- `LAKE_ROOT` optionally overrides the default lake directory.
+- `REFRESH` forces retrieval for days that are already complete.
 
-Run the cells in order. The last cell filters and previews the requested region
-from the shared lake. Start with a single historical day before a long backfill.
-CDS queue times, publication delays, and request limits are provider-controlled.
-Unavailable dates fail explicitly; the scraper does not invent data or silently
-clamp the requested interval. There is no implicit full-history download.
+Run the two code cells in order. To resume an interrupted backfill, keep the
+same region, variables, and date interval: already-complete days are skipped,
+and incomplete days are fetched again. Start with a short interval before a
+long backfill. The notebook does not start a download until the execution cell
+is run.
 
 ## Grid and Python API
 
@@ -67,10 +68,27 @@ california = WeatherGrid(north=42, west=-124.5, south=32.5, east=-114, name="Cal
 scraper = ERA5Scraper(california)
 summary = scraper.run(date(2000, 1, 1), date(2000, 1, 2))
 
+# Bulk read from the public ARCO Zarr mirror; writes to the same daily lake.
+summary = scraper.run_bulk(date(2000, 1, 1), date(2000, 2, 1))
+
 # Extends the same day files with Alaska's cells.
 alaska = WeatherGrid(north=72, west=170, south=51, east=-130, name="Alaska")
 ERA5Scraper(alaska).run(date(2000, 1, 1), date(2000, 1, 2))
 ```
+
+`run_bulk` reads the public ARCO ERA5 Zarr store (anonymous GCS access by
+default), selecting only the requested region, variables, and `[start, end)`
+time interval. It fetches days concurrently up to `workers`, skips complete
+partitions unless `refresh=True`, and merges into the same lake without
+removing other regions or variables. It avoids a separate CDS request for
+every variable/area/day, but still incurs remote GCS reads and needs network
+access to the public bucket. Partition updates are serialized and atomically
+replaced while the lake writer lock is held, so parallel reads cannot race to
+overwrite a daily file.
+
+Install `.[weather,notebooks]` to include the Zarr v3 and GCS filesystem
+dependencies required by `run_bulk`. The CDS downloader remains available and
+continues to use the CDS account credentials described above.
 
 `west > east` denotes an antimeridian-crossing box. The scraper splits it into
 two CDS areas and stores the ±180-degree seam only once. These are rectangular
@@ -131,10 +149,12 @@ archive. Do not assume it was available at the original valid time.
 
 The scraper uses bounded concurrent CDS clients with TLS verification enabled.
 NetCDF decoding is serialized because the netCDF4/HDF5 library is not
-thread-safe. Source files must contain every requested cell and all 24 hourly
-UTC timestamps for the day; missing/nonfinite values, conflicting duplicates,
-unexpected units within a variable, and incompatible existing schemas fail
-before a daily file is replaced.
+thread-safe. Bulk Zarr day reads are concurrent, but lake merges and writes
+remain serialized under the lake writer lock. Source data must contain every
+requested cell and all 24 hourly UTC timestamps for the day;
+missing/nonfinite values, conflicting duplicates, unexpected units within a
+variable, and incompatible existing schemas fail before a daily file is
+replaced.
 
 The existing writer-lock and atomic-Parquet helpers protect the merge. Runs
 sharing a lake or raw cache cannot write concurrently. Completed days survive

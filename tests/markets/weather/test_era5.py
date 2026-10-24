@@ -4,8 +4,9 @@ from __future__ import annotations
 
 import importlib.util
 import tempfile
+import time
 import unittest
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from pathlib import Path
 from threading import Lock
 from unittest.mock import patch
@@ -136,6 +137,134 @@ class ERA5Tests(unittest.TestCase):
         first = self.read().filter((pl.col('latitude') == 38) & (pl.col('longitude') == -122)).sort('timestamp')
         self.assertAlmostEqual(first['value'][0], 280 + 38 * .01 - 122 * .001)
 
+    def test_bulk_arco_zarr_writes_daily_partitions_and_refreshes(self):
+        import numpy as np
+        import xarray as xr
+
+        times = np.datetime64(self.day, "us") + np.arange(48) * np.timedelta64(1, "h")
+        coordinates = {
+            "time": times,
+            "latitude": list(self.grid.latitudes),
+            "longitude": [longitude % 360 for longitude in self.grid.longitudes],
+        }
+
+        def store(offset):
+            values = np.arange(48 * self.grid.point_count, dtype="float64").reshape(
+                48, len(self.grid.latitudes), len(self.grid.longitudes)
+            ) + offset
+            return xr.Dataset(
+                {
+                    "2m_temperature": (
+                        ("time", "latitude", "longitude"),
+                        values,
+                        {"units": "K"},
+                    )
+                },
+                coords=coordinates,
+            )
+
+        scraper = self.scraper()
+        with patch("xarray.open_zarr", return_value=store(0)) as open_zarr:
+            result = scraper.run_bulk(self.day, date(2000, 1, 3), store_url="fixture.zarr")
+        self.assertEqual(
+            (result.downloaded_requests, result.written_days, result.received_rows),
+            (1, 2, 2 * 24 * self.grid.point_count),
+        )
+        self.assertEqual(open_zarr.call_args.kwargs, {
+            "chunks": None, "storage_options": {"token": "anon"},
+        })
+        self.assertEqual(self.read().height, 24 * self.grid.point_count)
+        second_day = pl.read_parquet(
+            era5._partition(self.root / "lake", date(2000, 1, 2)),
+            hive_partitioning=False,
+        )
+        self.assertEqual(second_day.height, 24 * self.grid.point_count)
+
+        with patch("xarray.open_zarr") as open_zarr:
+            skipped = scraper.run_bulk(self.day, date(2000, 1, 3), store_url="fixture.zarr")
+        self.assertEqual(skipped.skipped_days, 2)
+        open_zarr.assert_not_called()
+
+        with patch("xarray.open_zarr", return_value=store(1000)):
+            refreshed = scraper.run_bulk(
+                self.day, self.end, store_url="fixture.zarr", refresh=True,
+            )
+        self.assertEqual(refreshed.written_days, 1)
+        self.assertEqual(self.read()["value"].min(), 1000)
+
+    def test_bulk_days_are_fetched_concurrently_and_written_without_duplicate_keys(self):
+        import numpy as np
+        import xarray as xr
+
+        day_count = 4
+        times = np.datetime64(self.day, "us") + np.arange(24 * day_count) * np.timedelta64(1, "h")
+        dataset = xr.Dataset(
+            {
+                "2m_temperature": (
+                    ("time", "latitude", "longitude"),
+                    np.ones((len(times), len(self.grid.latitudes), len(self.grid.longitudes))),
+                    {"units": "K"},
+                )
+            },
+            coords={
+                "time": times,
+                "latitude": list(self.grid.latitudes),
+                "longitude": [longitude % 360 for longitude in self.grid.longitudes],
+            },
+        )
+        active = 0
+        maximum_active = 0
+        state_lock = Lock()
+        active_selections = 0
+        maximum_active_selections = 0
+        selection_state_lock = Lock()
+        normalize = era5._normalize_arco
+        original_sel = xr.DataArray.sel
+
+        def track_normalization(*args):
+            nonlocal active, maximum_active
+            with state_lock:
+                active += 1
+                maximum_active = max(maximum_active, active)
+            try:
+                time.sleep(0.02)
+                return normalize(*args)
+            finally:
+                with state_lock:
+                    active -= 1
+
+        def track_selection(data_array, *args, **kwargs):
+            nonlocal active_selections, maximum_active_selections
+            with selection_state_lock:
+                active_selections += 1
+                maximum_active_selections = max(maximum_active_selections, active_selections)
+            try:
+                time.sleep(0.02)
+                return original_sel(data_array, *args, **kwargs)
+            finally:
+                with selection_state_lock:
+                    active_selections -= 1
+
+        with (
+            patch("xarray.open_zarr", return_value=dataset),
+            patch.object(xr.DataArray, "sel", track_selection),
+            patch.object(era5, "_normalize_arco", side_effect=track_normalization),
+        ):
+            result = self.scraper(workers=3).run_bulk(
+                self.day, self.day + timedelta(days=day_count), store_url="fixture.zarr",
+            )
+
+        self.assertEqual(result.written_days, day_count)
+        self.assertGreater(maximum_active, 1)
+        self.assertEqual(maximum_active_selections, 1)
+        for offset in range(day_count):
+            frame = pl.read_parquet(
+                era5._partition(self.root / "lake", self.day + timedelta(days=offset)),
+                hive_partitioning=False,
+            )
+            self.assertEqual(frame.height, 24 * self.grid.point_count)
+            self.assertFalse(frame.select(era5.KEYS).is_duplicated().any())
+
     def test_california_and_alaska_extend_the_same_parquet(self):
         self.scraper().run(self.day, self.end)
         old = self.read()
@@ -246,7 +375,7 @@ class ERA5Tests(unittest.TestCase):
         self.assertTrue(self.read().equals(original))
         self.assertEqual(len(list((self.root/'raw').rglob('*.nc'))), 1)
 
-    def test_notebook_download_and_preview_cells_execute_with_cds_fixture(self):
+    def test_minimal_notebook_resumes_bulk_ingestion_with_configured_globals(self):
         import contextlib
         import io
 
@@ -255,21 +384,41 @@ class ERA5Tests(unittest.TestCase):
         import nbformat
 
         root = Path(__file__).resolve().parents[3]
-        notebook = nbformat.read(root/'notebooks/markets/weather/era5_ingestion.ipynb', as_version=4)
+        notebook = nbformat.read(root/'notebooks/era5_ingestion.ipynb', as_version=4)
         nbformat.validate(notebook)
         namespace = {}
-        first_code_cell = True
-        with patch.object(era5.ERA5Scraper, '_client', new=staticmethod(self.client_factory)), contextlib.redirect_stdout(io.StringIO()):
+        configured = False
+        import numpy as np
+        import xarray as xr
+
+        times = np.datetime64(self.day, "us") + np.arange(24) * np.timedelta64(1, "h")
+        dataset = xr.Dataset(
+            {
+                "2m_temperature": (
+                    ("time", "latitude", "longitude"),
+                    np.ones((24, len(self.grid.latitudes), len(self.grid.longitudes))),
+                    {"units": "K"},
+                )
+            },
+            coords={
+                "time": times,
+                "latitude": list(self.grid.latitudes),
+                "longitude": [longitude % 360 for longitude in self.grid.longitudes],
+            },
+        )
+        with patch("xarray.open_zarr", return_value=dataset), contextlib.redirect_stdout(io.StringIO()):
             for index, cell in enumerate(notebook.cells):
                 if cell.cell_type != 'code':
                     continue
                 exec(compile(cell.source, f'notebook-cell-{index}', 'exec'), namespace)
-                if first_code_cell:
+                if not configured and "START_DATE" in namespace:
                     namespace.update(
                         NORTH=self.grid.north, WEST=self.grid.west, SOUTH=self.grid.south, EAST=self.grid.east,
-                        LAKE_ROOT=str(self.root/'lake'), RAW_ROOT=str(self.root/'raw'), RUN_DOWNLOAD=True,
+                        START_DATE=self.day, END_DATE=self.end, VARIABLES=("2m_temperature",),
+                        LAKE_ROOT=str(self.root/'lake'),
                     )
-                    first_code_cell = False
+                    configured = True
+        self.assertEqual(len([cell for cell in notebook.cells if cell.cell_type == "code"]), 2)
         self.assertEqual(namespace['summary'].written_days, 1)
         self.assertEqual(self.read().height, 96)
 

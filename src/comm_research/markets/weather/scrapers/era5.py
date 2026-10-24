@@ -12,7 +12,7 @@ import logging
 import os
 import tempfile
 import zipfile
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
@@ -29,6 +29,7 @@ CDS_URL = "https://cds.climate.copernicus.eu/api"
 DATASET = "reanalysis-era5-single-levels"
 DEFAULT_LAKE_ROOT = PROJECT_ROOT / "data/lake/weather/era5"
 DEFAULT_RAW_ROOT = PROJECT_ROOT / "data/raw/weather/era5"
+ARCO_ZARR_STORE = "gs://gcp-public-data-arco-era5/ar/full_37-1h-0p25deg-chunk-1.zarr-v3"
 VARIABLES = {
     "2m_temperature": ("t2m", "2t"),
     "2m_dewpoint_temperature": ("d2m", "2d"),
@@ -52,6 +53,7 @@ SCHEMA = {
 KEYS = ["timestamp", "latitude", "longitude", "variable"]
 logger = logging.getLogger(__name__)
 _NETCDF_LOCK = Lock()  # netCDF4/HDF5 decoding is not thread-safe.
+_ARCO_INDEX_LOCK = Lock()  # xarray/pandas label selection is unsafe on a shared dataset.
 
 
 def _partition(root: Path, day: date) -> Path:
@@ -172,6 +174,72 @@ def _decode_netcdf(path: Path, variable: str, area, day: date) -> pl.DataFrame:
     return frame
 
 
+def _normalize_arco(dataset, variable: str, grid: WeatherGrid, day: date) -> pl.DataFrame:
+    import numpy as np
+
+    names = [name for name in (*VARIABLES[variable], variable) if name in dataset.data_vars]
+    if len(names) != 1:
+        raise ValueError(f"Expected one {variable} field in the ARCO ERA5 store")
+    values = dataset[names[0]]
+    unit = values.attrs.get("units")
+    if not isinstance(unit, str) or not unit.strip():
+        raise ValueError("ARCO ERA5 field has no physical units")
+    unit = unit.strip()
+    if "expver" in values.dims:
+        versions = list(values.expver.values)
+        if not all(str(version) in ("1", "5") for version in versions):
+            raise ValueError("Unexpected ERA5 experiment versions")
+        ordered = sorted(versions, key=lambda version: str(version) != "1")
+        combined = values.sel(expver=ordered[0], drop=True)
+        for version in ordered[1:]:
+            combined = combined.combine_first(values.sel(expver=version, drop=True))
+        values = combined
+    time_name = "valid_time" if "valid_time" in values.dims else "time"
+    wanted = (time_name, "latitude", "longitude")
+    for dimension in set(values.dims) - set(wanted):
+        if values.sizes[dimension] != 1:
+            raise ValueError(f"Unexpected ARCO ERA5 dimension: {dimension}")
+        values = values.squeeze(dimension, drop=True)
+    if set(values.dims) != set(wanted):
+        raise ValueError("Missing ARCO ERA5 time/latitude/longitude dimensions")
+
+    source_longitudes = [longitude % 360 for longitude in grid.longitudes]
+    with _ARCO_INDEX_LOCK:
+        values = values.sel(
+            latitude=list(grid.latitudes),
+            longitude=source_longitudes,
+            **{
+                time_name: slice(
+                    np.datetime64(day, "us"),
+                    np.datetime64(day, "us") + np.timedelta64(23, "h"),
+                )
+            },
+        ).transpose(*wanted)
+    times = np.asarray(values[time_name].values)
+    expected_times = np.datetime64(day, "us") + np.arange(24) * np.timedelta64(1, "h")
+    if (not np.issubdtype(times.dtype, np.datetime64) or np.isnat(times).any()
+            or not np.array_equal(times.astype("datetime64[us]"), expected_times)):
+        raise ValueError("ARCO ERA5 response does not contain exactly 24 UTC hours")
+
+    latitudes = np.asarray(values.latitude.values, dtype="float64")
+    longitudes = (np.asarray(values.longitude.values, dtype="float64") + 180) % 360 - 180
+    if (not np.array_equal(latitudes, grid.latitudes)
+            or not np.array_equal(longitudes, grid.longitudes)):
+        raise ValueError("ARCO ERA5 response does not match the requested native grid")
+    data = np.asarray(values.values, dtype="float64")
+    cells = len(latitudes) * len(longitudes)
+    frame = pl.DataFrame({
+        "timestamp": np.repeat(times.astype("datetime64[us]"), cells),
+        "latitude": np.tile(np.repeat(latitudes, len(longitudes)), 24),
+        "longitude": np.tile(longitudes, 24 * len(latitudes)),
+        "variable": [variable] * (24 * cells),
+        "value": data.reshape(-1),
+        "unit": [unit] * (24 * cells),
+    }).with_columns(pl.col("timestamp").dt.replace_time_zone("UTC"))
+    _validate(frame, day)
+    return frame
+
+
 @dataclass
 class RunSummary:
     downloaded_requests: int = 0
@@ -181,7 +249,7 @@ class RunSummary:
 
 
 class ERA5Scraper:
-    """Pull a WeatherGrid from CDS and upsert it into shared daily Parquet."""
+    """Pull a WeatherGrid from CDS or ARCO and upsert it into shared daily Parquet."""
 
     def __init__(
         self, grid: WeatherGrid, *, variables=("2m_temperature",),
@@ -302,4 +370,97 @@ class ERA5Scraper:
                 summary.received_rows += incoming.height
                 logger.info("SAVED %s: %d incoming rows; %d total rows", day, incoming.height, merged.height)
                 day += timedelta(days=1)
+        return summary
+
+    def run_bulk(
+        self,
+        start: date,
+        end: date,
+        *,
+        store_url: str = ARCO_ZARR_STORE,
+        storage_options: dict | None = None,
+        refresh: bool = False,
+    ) -> RunSummary:
+        """Pull an interval from the public ARCO ERA5 Zarr store into daily lake files.
+
+        The date range is [start, end). Requested days are fetched concurrently
+        up to ``workers``; only the calling thread merges and atomically writes
+        completed partitions. Existing complete partitions are skipped unless
+        refreshing.
+        """
+        if (not isinstance(start, date) or isinstance(start, datetime)
+                or not isinstance(end, date) or isinstance(end, datetime)
+                or start < date(1940, 1, 1) or start >= end
+                or end > datetime.now(timezone.utc).date()):
+            raise ValueError("Use date objects with 1940-01-01 <= start < end <= today (UTC); end is exclusive")
+        if not isinstance(store_url, str) or not store_url.strip():
+            raise ValueError("store_url must be a nonempty string")
+
+        summary = RunSummary()
+        with writer_lock(self.lake_root):
+            pending_days = []
+            day = start
+            while day < end:
+                target = _partition(self.lake_root, day)
+                existing = pl.read_parquet(target, hive_partitioning=False) if target.exists() else None
+                if existing is not None:
+                    _validate(existing, day)
+                    if not refresh and _complete(existing, self.grid, self.variables):
+                        summary.skipped_days += 1
+                        day += timedelta(days=1)
+                        continue
+                pending_days.append((day, existing))
+                day += timedelta(days=1)
+            if not pending_days:
+                return summary
+
+            import xarray as xr
+
+            options = {"token": "anon"} if storage_options is None else storage_options
+            with xr.open_zarr(store_url, chunks=None, storage_options=options) as dataset:
+                def fetch_day(item):
+                    requested_day, existing = item
+                    incoming = pl.concat(
+                        [
+                            _normalize_arco(dataset, variable, self.grid, requested_day)
+                            for variable in self.variables
+                        ]
+                    )
+                    _validate(incoming, requested_day)
+                    if not _complete(incoming, self.grid, self.variables):
+                        raise ValueError(
+                            "Incomplete ARCO ERA5 grid coverage; daily partition was not changed"
+                        )
+                    return requested_day, existing, incoming
+
+                pending = iter(pending_days)
+                with ThreadPoolExecutor(max_workers=self.workers) as executor:
+                    futures = {}
+                    for _ in range(min(self.workers, len(pending_days))):
+                        item = next(pending)
+                        futures[executor.submit(fetch_day, item)] = item
+
+                    while futures:
+                        completed, _ = wait(futures, return_when=FIRST_COMPLETED)
+                        for future in completed:
+                            futures.pop(future)
+                            day, existing, incoming = future.result()
+                            merged = pl.concat([existing, incoming]) if existing is not None else incoming
+                            merged = merged.unique(subset=KEYS, keep="last").sort(KEYS)
+                            _validate(merged, day)
+                            write_atomic(merged, _partition(self.lake_root, day))
+                            summary.written_days += 1
+                            summary.received_rows += incoming.height
+                            logger.info(
+                                "SAVED %s from ARCO Zarr: %d incoming rows; %d total rows",
+                                day, incoming.height, merged.height,
+                            )
+
+                            try:
+                                item = next(pending)
+                            except StopIteration:
+                                continue
+                            futures[executor.submit(fetch_day, item)] = item
+
+            summary.downloaded_requests = 1
         return summary
