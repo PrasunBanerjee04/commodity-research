@@ -89,12 +89,27 @@ on port 8502; see [generic analytics](docs/dashboard.md).
 
 ## Regional ERA5 weather
 
-Use [the ERA5 notebook](notebooks/markets/weather/era5_ingestion.ipynb) to define
+Use [the ERA5 notebook](notebooks/era5_ingestion.ipynb) to define
 a weather grid and pull hourly reanalysis directly from Copernicus CDS into
 `data/lake/weather/era5/year=YYYY/month=MM/day=DD/data.parquet`. Further regional
 pulls merge into the same daily files without duplicating overlapping cells.
 Install `.[weather,notebooks]` and configure your CDS credentials securely.
 See [ERA5 setup and schema](docs/markets/weather/era5.md).
+
+## ERA5 weather reanalysis
+
+Download global hourly 2 m temperature into daily Parquet lake partitions:
+
+```bash
+.venv/bin/python -m pip install -e '.[era5]'
+.venv/bin/python src/comm_research/markets/weather/era5.py \
+  --start 2000-01-01 --end 2000-01-02
+```
+
+Running without date flags backfills from 2000 through the mirror's latest
+complete finalized day. Use a larger `--lake` volume for the full history.
+See [ERA5 ingestion](docs/markets/weather/era5_global.md) for configuration, schema,
+parallel retrieval, and restart behavior.
 
 ## Documentation
 
