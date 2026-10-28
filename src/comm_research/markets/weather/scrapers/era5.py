@@ -1,6 +1,6 @@
 """Regional hourly ERA5 ingestion from the Copernicus Climate Data Store.
 
-One shared UTC-day partition contains every requested region and variable.
+Each variable has its own UTC-day partition containing every requested region.
 Re-fetching an observation updates its value without dropping other regions.
 """
 
@@ -57,8 +57,22 @@ _NETCDF_LOCK = Lock()  # netCDF4/HDF5 decoding is not thread-safe.
 _ARCO_INDEX_LOCK = Lock()  # xarray/pandas label selection is unsafe on a shared dataset.
 
 
-def _partition(root: Path, day: date) -> Path:
-    return root / f"year={day:%Y}/month={day:%m}/day={day:%d}/data.parquet"
+VARIABLE_DIRECTORIES = {
+    "2m_temperature": "t_2m",
+    "2m_dewpoint_temperature": "dewpoint_2m",
+    "10m_u_component_of_wind": "u_10m",
+    "10m_v_component_of_wind": "v_10m",
+    "100m_u_component_of_wind": "u_100m",
+    "100m_v_component_of_wind": "v_100m",
+    "surface_pressure": "surface_pressure",
+    "surface_solar_radiation_downwards": "solar_radiation",
+    "total_cloud_cover": "cloud_cover",
+    "total_precipitation": "precip",
+}
+
+
+def _partition(root: Path, day: date, variable: str = "2m_temperature") -> Path:
+    return root / VARIABLE_DIRECTORIES[variable] / f"year={day:%Y}/month={day:%m}/day={day:%d}/data.parquet"
 
 
 def _validate(frame: pl.DataFrame, day: date):
@@ -311,7 +325,7 @@ class ERA5Scraper:
             "data_format": "netcdf", "download_format": "unarchived",
         }
         fingerprint = hashlib.sha256(json.dumps(request, sort_keys=True).encode()).hexdigest()
-        target = self.raw_root / f"{day:%Y/%m/%d}" / f"{fingerprint}.nc"
+        target = self.raw_root / VARIABLE_DIRECTORIES[variable] / f"{day:%Y/%m/%d}" / f"{fingerprint}.nc"
         target.parent.mkdir(parents=True, exist_ok=True)
         downloaded = 0
         if refresh or not target.exists():
@@ -430,8 +444,7 @@ class ERA5Scraper:
             pending_days = []
             day = start
             while day < end:
-                target = _partition(self.lake_root, day)
-                existing = pl.read_parquet(target, hive_partitioning=False) if target.exists() else None
+                existing = self._read_day(day)
                 if existing is not None:
                     _validate(existing, day)
                     if not refresh and _complete(existing, self.grid, self.variables):
@@ -477,7 +490,7 @@ class ERA5Scraper:
                             merged = pl.concat([existing, incoming]) if existing is not None else incoming
                             merged = merged.unique(subset=KEYS, keep="last").sort(KEYS)
                             _validate(merged, day)
-                            write_atomic(merged, _partition(self.lake_root, day))
+                            self._write_day(merged, day)
                             summary.written_days += 1
                             summary.received_rows += incoming.height
                             logger.info(
@@ -494,11 +507,29 @@ class ERA5Scraper:
             summary.downloaded_requests = 1
         return summary
 
+    def _read_day(self, day):
+        frames = []
+        for variable in self.variables:
+            target = _partition(self.lake_root, day, variable)
+            if target.exists():
+                frame = pl.read_parquet(target, hive_partitioning=False)
+                _validate(frame, day)
+                if frame.filter(pl.col("variable") != variable).height:
+                    raise ValueError(f"Unexpected variable in {target}")
+                frames.append(frame)
+        return pl.concat(frames) if frames else None
+
+    def _write_day(self, frame, day):
+        for variable in self.variables:
+            write_atomic(
+                frame.filter(pl.col("variable") == variable),
+                _partition(self.lake_root, day, variable),
+            )
+
     def _plan_days(self, start, end, refresh, summary):
         day = start
         while day < end:
-            target = _partition(self.lake_root, day)
-            existing = pl.read_parquet(target, hive_partitioning=False) if target.exists() else None
+            existing = self._read_day(day)
             if existing is not None:
                 _validate(existing, day)
                 if not refresh and _complete(existing, self.grid, self.variables):
@@ -529,7 +560,7 @@ class ERA5Scraper:
         merged = pl.concat([existing, incoming]) if existing is not None else incoming
         merged = merged.unique(subset=KEYS, keep="last").sort(KEYS)
         _validate(merged, day)
-        write_atomic(merged, _partition(self.lake_root, day))
+        self._write_day(merged, day)
         if not self.keep_raw:
             for _, raw, _ in results:
                 raw.unlink(missing_ok=True)

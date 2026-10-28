@@ -216,7 +216,7 @@ class PipelineTests(unittest.TestCase):
         self.assertEqual(schema.field("temperature_2m").metadata[b"units"], b"K")
         self.assertEqual(str(schema.field("timestamp").type), "timestamp[us, tz=UTC]")
         self.assertEqual(schema.metadata[b"source_status"], b"finalized")
-        manifest = self.lake / ".state/weather/era5/2000/02/29.json"
+        manifest = self.lake / ".state/weather/era5/t_2m/2000/02/29.json"
         self.assertEqual(json.loads(manifest.read_text())["rows"], 144)
         self.calls.clear()
         again = self.run_pipeline()
@@ -232,7 +232,7 @@ class PipelineTests(unittest.TestCase):
         self.assertTrue(pipeline.partition(self.lake, self.first).exists())
         self.assertFalse(pipeline.partition(self.lake, date(2000, 2, 29)).exists())
         self.assertEqual(list(self.lake.rglob("*.partial")), [])
-        self.assertFalse((self.lake / ".state/weather/era5/2000/02/29.json").exists())
+        self.assertFalse((self.lake / ".state/weather/era5/t_2m/2000/02/29.json").exists())
         self.fail_hour = None
         self.calls.clear()
         result = self.run_pipeline()
@@ -241,7 +241,7 @@ class PipelineTests(unittest.TestCase):
 
     def test_missing_manifest_is_rebuilt_without_download(self):
         self.run_pipeline()
-        manifest = self.lake / ".state/weather/era5/2000/02/28.json"
+        manifest = self.lake / ".state/weather/era5/t_2m/2000/02/28.json"
         manifest.unlink()
         self.calls.clear()
         self.assertEqual(self.run_pipeline().skipped, 2)
@@ -252,7 +252,7 @@ class PipelineTests(unittest.TestCase):
         from dataclasses import replace
 
         self.run_pipeline()
-        manifest = self.lake / ".state/weather/era5/2000/02/28.json"
+        manifest = self.lake / ".state/weather/era5/t_2m/2000/02/28.json"
         manifest.write_text("invalid JSON")
         old_info = self.info
 

@@ -21,8 +21,8 @@ from .client import ERA5Client, SOURCE_URL
 from .normalizer import HourNormalizer, SCHEMA_VERSION, parquet_schema
 
 DEFAULT_LAKE_ROOT = PROJECT_ROOT / "data/lake"
-DEFAULT_STATE_ROOT = PROJECT_ROOT / "data/state/weather/era5"
-DATASET = Path("weather/era5/single_levels")
+DEFAULT_STATE_ROOT = PROJECT_ROOT / "data/state/weather/era5/t_2m"
+DATASET = Path("weather/era5/t_2m/single_levels")
 logger = logging.getLogger(__name__)
 
 
@@ -199,7 +199,7 @@ def run(
     lake = Path(lake).expanduser().resolve()
     # Custom lakes keep state beside their own data unless explicitly overridden.
     state = (Path(state).expanduser().resolve() if state is not None
-             else lake / ".state/weather/era5" if lake != DEFAULT_LAKE_ROOT.resolve()
+             else lake / ".state/weather/era5/t_2m" if lake != DEFAULT_LAKE_ROOT.resolve()
              else DEFAULT_STATE_ROOT)
     summary = RunSummary()
     with writer_lock(lake), ERA5Client(

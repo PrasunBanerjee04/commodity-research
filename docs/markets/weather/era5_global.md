@@ -48,14 +48,14 @@ is `<project>/data/lake`, respecting `COMM_RESEARCH_ROOT` through the shared pat
 helper. Partitions follow the repository's existing convention:
 
 ```text
-data/lake/weather/era5/single_levels/
+data/lake/weather/era5/t_2m/single_levels/
 └── year=2000/month=01/day=01/data.parquet
 
-data/state/weather/era5/
+data/state/weather/era5/t_2m/
 └── 2000/01/01.json
 ```
 
-With a custom lake root, state defaults to `<lake>/.state/weather/era5/` so it
+With a custom lake root, state defaults to `<lake>/.state/weather/era5/t_2m/` so it
 travels with that lake. `--state` overrides it explicitly.
 
 Each Parquet file contains **24,917,760 rows**, covering all 24 UTC hours of one
@@ -80,7 +80,7 @@ import polars as pl
 
 temperature = (
     pl.scan_parquet(
-        "data/lake/weather/era5/single_levels/**/*.parquet",
+        "data/lake/weather/era5/t_2m/single_levels/**/*.parquet",
         hive_partitioning=True,
     )
     .filter(

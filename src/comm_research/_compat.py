@@ -26,7 +26,7 @@ ALIASES = {
     CAISO + ".caiso_oasis_pipeline": CAISO + ".pipelines.oasis",
     "comm_research.dashboard.research_lake": CAISO + ".dashboard.research",
 }
-NAMESPACES = {"comm_research.infra.scrapers", "comm_research.infra.tools"}
+NAMESPACES = {"comm_research.infra.scrapers"}
 
 
 class _AliasLoader(importlib.abc.Loader):
