@@ -39,7 +39,7 @@ def main(argv=None) -> int:
     parser.add_argument("--end", type=date.fromisoformat, default=END_DATE,
                         help="Exclusive UTC end date (default: latest finalized complete day)")
     parser.add_argument("--lake", type=Path, default=LAKE_ROOT,
-                        help="Lake root; appends weather/era5/single_levels/year=…")
+                        help="Lake root; appends weather/era5/t_2m/single_levels/year=…")
     parser.add_argument("--state", type=Path, help="Override progress-manifest directory")
     parser.add_argument("--workers", type=int, default=WORKERS)
     parser.add_argument("--retries", type=int, default=4)

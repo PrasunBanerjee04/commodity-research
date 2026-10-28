@@ -19,6 +19,34 @@ from comm_research.markets.weather.scrapers import era5
 HAS_WEATHER = all(importlib.util.find_spec(name) for name in ("numpy", "xarray", "netCDF4"))
 
 
+class VariableStorageTests(unittest.TestCase):
+    def test_variable_partitions_are_independent_and_resumable(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            day = date(2000, 1, 1)
+            grid = WeatherGrid(north=0, west=0, south=0, east=0)
+            scraper = era5.ERA5Scraper(
+                grid, lake_root=root / "lake", raw_root=root / "raw",
+                variables=("2m_temperature", "total_precipitation"),
+            )
+            frames = [pl.DataFrame({
+                "timestamp": [datetime(2000, 1, 1, hour, tzinfo=era5.timezone.utc) for hour in range(24)],
+                "latitude": [0.0] * 24, "longitude": [0.0] * 24,
+                "variable": [variable] * 24, "value": [value] * 24,
+                "unit": [unit] * 24,
+            }, schema=era5.SCHEMA) for variable, value, unit in (
+                ("2m_temperature", 280.0, "K"), ("total_precipitation", 0.01, "m"),
+            )]
+            scraper._write_day(pl.concat(frames), day)
+            for variable, folder in (("2m_temperature", "t_2m"), ("total_precipitation", "precip")):
+                target = root / "lake" / folder / "year=2000/month=01/day=01/data.parquet"
+                self.assertEqual(pl.read_parquet(target)["variable"].unique().to_list(), [variable])
+            self.assertTrue(era5._complete(scraper._read_day(day), grid, scraper.variables))
+            temperature = era5.ERA5Scraper(grid, lake_root=root / "lake", raw_root=root / "raw")
+            temperature._write_day(frames[0].with_columns(pl.lit(290.0).alias("value")), day)
+            self.assertTrue(scraper._read_day(day).filter(pl.col("variable") == "total_precipitation").equals(frames[1]))
+
+
 class WeatherGridTests(unittest.TestCase):
     def test_native_cell_alignment_and_cds_coordinate_order(self):
         grid = WeatherGrid(north=38.14, west=-122.12, south=37.6, east=-121.6)
@@ -121,7 +149,7 @@ class ERA5Tests(unittest.TestCase):
         )
 
     def read(self):
-        return pl.read_parquet(era5._partition(self.root/'lake', self.day), hive_partitioning=False)
+        return pl.read_parquet(str(self.root/'lake'/'*'/f'year={self.day:%Y}/month={self.day:%m}/day={self.day:%d}/data.parquet'), hive_partitioning=False)
 
     def test_cds_request_and_hourly_schema(self):
         result = self.scraper().run(self.day, self.end)
@@ -300,6 +328,11 @@ class ERA5Tests(unittest.TestCase):
         self.scraper(variables=('2m_dewpoint_temperature',)).run(self.day, self.end)
         self.assertEqual(self.read().height, 192)
         self.assertEqual(self.read()['variable'].n_unique(), 2)
+        for variable in ('2m_temperature', '2m_dewpoint_temperature'):
+            frame = pl.read_parquet(era5._partition(self.root/'lake', self.day, variable))
+            self.assertEqual(frame['variable'].unique().to_list(), [variable])
+        self.assertEqual(era5._partition(self.root/'lake', self.day).parts[-5], 't_2m')
+        self.assertEqual(era5._partition(self.root/'lake', self.day, 'total_precipitation').parts[-5], 'precip')
 
     def test_antimeridian_seam_is_written_once(self):
         grid = WeatherGrid(north=52, west=179.75, south=52, east=-179.75)

@@ -116,15 +116,18 @@ separately, keeping NetCDF field and unit interpretation explicit.
 
 ```text
 data/lake/weather/era5/
-└── year=2000/month=01/day=01/data.parquet
+└── t_2m/year=2000/month=01/day=01/data.parquet
 
 data/raw/weather/era5/
-└── 2000/01/01/<request-fingerprint>.nc
+└── t_2m/2000/01/01/<request-fingerprint>.nc
 ```
 
 `lake_root` is the ERA5 dataset directory, not the top-level lake directory.
 It defaults to `<project>/data/lake/weather/era5`. Paths use the repository's
-shared project-root helper and respect `COMM_RESEARCH_ROOT`.
+shared project-root helper and respect `COMM_RESEARCH_ROOT`. Each variable gets
+its own subdirectory: `2m_temperature` uses `t_2m`, `total_precipitation`
+uses `precip`, and the remaining names are in `VARIABLE_DIRECTORIES`.
+Custom lake and raw roots also receive these variable subdirectories.
 
 | Column | Type | Meaning |
 | --- | --- | --- |
@@ -177,8 +180,10 @@ the coordinator validates and writes completed dates. A slow earlier date does
 not prevent a later complete date from being published.
 
 Only the calling/coordinator thread merges and writes Parquet. All variables
-and antimeridian areas for a date must finish before its file is updated, once
-per run. NetCDF decoding is serialized because the netCDF4/HDF5 library is not
+and antimeridian areas for a date must finish before its variable files are
+updated, once per run. Each variable file is published atomically; a failure
+between variable writes can leave some variables complete. Rerunning safely
+merges the cached responses and completes the remaining files. NetCDF decoding is serialized because the netCDF4/HDF5 library is not
 thread-safe. Source files must contain every requested cell and all 24 hourly
 UTC timestamps for the day; missing/nonfinite values, conflicting duplicates,
 unexpected units within a variable, and incompatible existing schemas fail
