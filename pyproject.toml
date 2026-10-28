@@ -10,7 +10,7 @@ requires-python = ">=3.10"
 dependencies = ["polars>=1.0,<2"]
 
 [project.optional-dependencies]
-vis = ["plotly>=6,<7"]
+vis = ["plotly>=6,<7", "kaleido>=1,<2"]
 dashboard = ["pyarrow>=14,<26", "duckdb>=1.2,<2", "fastapi>=0.115,<1", "uvicorn>=0.30,<1"]
 weather = ["cdsapi>=0.7.7,<1", "numpy>=1.26,<3", "xarray>=2024.10,<2027", "netCDF4>=1.7.2,<2", "zarr>=3,<4", "gcsfs>=2024.3,<2027"]
 notebooks = ["ipykernel>=6,<8", "nbformat>=5,<6"]

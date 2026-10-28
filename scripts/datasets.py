@@ -17,6 +17,11 @@ def load_data(data_field):
 def socal_temp_2m(dataset_dir, lon, lat):
     table = scan_parquet(Path(dataset_dir))
     df = table.collect()
+
+    df = df.filter(
+        (pl.col('latitude') == lat) &
+        (pl.col('longitude') == lon)
+    )
     return df
 
 def save(filepath, df):
@@ -30,4 +35,13 @@ def save(filepath, df):
 
 
 if __name__ == "__main__":
-    pass
+
+    lat = 32.5
+    lon = -121.0
+
+    data_dir = Path(DATA_DIR, 'lake/weather/t_2m')
+    save_dir = f'data/clean/socal_temp_2m_{lat}_{lon}.csv'
+
+    df = socal_temp_2m(data_dir, lon, lat)
+
+    save(save_dir, df)
