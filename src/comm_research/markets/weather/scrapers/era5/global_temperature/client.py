@@ -58,7 +58,9 @@ class HTTPStore(MutableMapping):
                         "allow storage.googleapis.com"
                     ) from error
                 if attempt == self.retries:
-                    raise SourceError(f"ERA5 transport failed for {key}: {error}") from error
+                    raise SourceError(
+                        f"ERA5 transport failed for {key}: {error}"
+                    ) from error
                 delay = min(30.0, 2**attempt + random.random())
             else:
                 if response.status_code == 200:
@@ -81,8 +83,10 @@ class HTTPStore(MutableMapping):
                         try:
                             delay = max(
                                 delay,
-                                (parsedate_to_datetime(retry_after)
-                                 - datetime.now(timezone.utc)).total_seconds(),
+                                (
+                                    parsedate_to_datetime(retry_after)
+                                    - datetime.now(timezone.utc)
+                                ).total_seconds(),
                             )
                         except (ValueError, TypeError):
                             pass
@@ -159,13 +163,19 @@ class ERA5Client:
         group = zarr.open_consolidated(self.store, mode="r")
         self.temperature = group[VARIABLE]
         if self.temperature.attrs.get("_ARRAY_DIMENSIONS") != [
-            "time", "latitude", "longitude"
+            "time",
+            "latitude",
+            "longitude",
         ]:
-            raise SourceError("Unexpected temperature dimensions; refusing to remap silently")
+            raise SourceError(
+                "Unexpected temperature dimensions; refusing to remap silently"
+            )
         if self.temperature.attrs.get("units") != "K":
             raise SourceError("Expected ERA5 temperature in kelvin")
         if self.temperature.dtype != np.dtype("float32"):
-            raise SourceError("Expected float32 ERA5 temperature; source schema changed")
+            raise SourceError(
+                "Expected float32 ERA5 temperature; source schema changed"
+            )
         latitude = np.asarray(group["latitude"][:])
         longitude = np.asarray(group["longitude"][:])
         if (
@@ -180,17 +190,32 @@ class ERA5Client:
         if calendar not in ("standard", "gregorian", "proleptic_gregorian"):
             raise SourceError(f"Unsupported ERA5 calendar: {calendar}")
         units = time_array.attrs.get("units", "")
-        match = re.fullmatch(r"(hours|days|minutes|seconds|microseconds|nanoseconds) since (.+)", units)
+        match = re.fullmatch(
+            r"(hours|days|minutes|seconds|microseconds|nanoseconds) since (.+)", units
+        )
         if not match:
             raise SourceError(f"Unsupported ERA5 time encoding: {units}")
-        unit = dict(hours="h", days="D", minutes="m", seconds="s",
-                    microseconds="us", nanoseconds="ns")[match[1]]
+        unit = {
+            "hours": "h",
+            "days": "D",
+            "minutes": "m",
+            "seconds": "s",
+            "microseconds": "us",
+            "nanoseconds": "ns",
+        }[match[1]]
         offsets = np.asarray(time_array[:])
-        if not np.isfinite(offsets).all() or not np.equal(offsets, np.floor(offsets)).all():
+        if (
+            not np.isfinite(offsets).all()
+            or not np.equal(offsets, np.floor(offsets)).all()
+        ):
             raise SourceError("ERA5 time coordinates must contain integer offsets")
-        times = (utc_timestamp(match[2]) + offsets.astype(f"timedelta64[{unit}]")).astype("datetime64[us]")
+        times = (
+            utc_timestamp(match[2]) + offsets.astype(f"timedelta64[{unit}]")
+        ).astype("datetime64[us]")
         if not len(times) or not np.all(np.diff(times) == np.timedelta64(1, "h")):
-            raise SourceError("ERA5 time coordinates are not contiguous hourly UTC values")
+            raise SourceError(
+                "ERA5 time coordinates are not contiguous hourly UTC values"
+            )
         if self.temperature.shape != (len(times), 721, 1440):
             raise SourceError("Temperature shape does not match coordinate arrays")
         attrs = group.attrs.asdict()
@@ -198,19 +223,29 @@ class ERA5Client:
             first = max(utc_timestamp(attrs["valid_time_start"]), times[0])
             last = min(utc_timestamp(attrs["valid_time_stop"]), times[-1])
         except KeyError as error:
-            raise SourceError("Source lacks finalized-data availability metadata") from error
+            raise SourceError(
+                "Source lacks finalized-data availability metadata"
+            ) from error
         if np.isnat(first) or np.isnat(last) or first > last:
             raise SourceError("Invalid finalized-data availability metadata")
-        if first != first.astype("datetime64[h]") or last != last.astype("datetime64[h]"):
-            raise SourceError("Source availability timestamps are not aligned to UTC hours")
+        if first != first.astype("datetime64[h]") or last != last.astype(
+            "datetime64[h]"
+        ):
+            raise SourceError(
+                "Source availability timestamps are not aligned to UTC hours"
+            )
         # Round the start up and the stop down to retain only complete UTC days.
         first_day = first.astype("datetime64[D]")
         if first > first_day:
             first_day += np.timedelta64(1, "D")
         end_day = (last + np.timedelta64(1, "h")).astype("datetime64[D]")
         self.info = SourceInfo(
-            url=url, latitude=latitude, longitude=longitude, times=times,
-            first_day=first_day.item(), end_day=end_day.item(),
+            url=url,
+            latitude=latitude,
+            longitude=longitude,
+            times=times,
+            first_day=first_day.item(),
+            end_day=end_day.item(),
             valid_time_stop=str(attrs["valid_time_stop"]),
             last_updated=str(attrs.get("last_updated", "unknown")),
         )

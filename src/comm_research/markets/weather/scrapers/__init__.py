@@ -6,11 +6,11 @@ Edit _EXPORTS to expose additional modules or helpers; imports load on demand.
 from comm_research._exports import lazy_exports as _lazy_exports
 
 _EXPORTS = {
-    'era5_global': ('.era5_global', None),
-    'ecmwf': ('.ecmwf', None),
-    'era5': ('.era5', None),
-    'ERA5Scraper': ('.era5', 'ERA5Scraper'),
-    'RunSummary': ('.era5', 'RunSummary'),
+    "era5_global": (".era5.global_temperature", None),
+    "ecmwf": (".ecmwf", None),
+    "era5": (".era5", None),
+    "ERA5Scraper": (".era5", "ERA5Scraper"),
+    "RunSummary": (".era5", "RunSummary"),
 }
 
 __all__ = list(_EXPORTS)

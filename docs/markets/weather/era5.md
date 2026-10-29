@@ -1,5 +1,7 @@
 # Regional ERA5 ingestion
 
+See the [package map](era5/README.md) for the regional/global split and migration notes.
+
 Use [the ingestion notebook](../../../notebooks/era5_ingestion.ipynb) to bulk
 ingest ERA5 hourly single-level reanalysis from the public ARCO Zarr mirror on
 Google Cloud Storage. The default variable is **2 m temperature**. The Python
@@ -55,7 +57,7 @@ CDS retrieval details:
 - `KEEP_RAW` retains successful NetCDF downloads when enabled.
 - `RUN_DOWNLOAD` starts as `False`; set it to `True` after checking the settings.
 
-Run the two code cells in order. To resume an interrupted backfill, keep the
+Run the three code cells in order: settings, imports, then retrieval. To resume an interrupted backfill, keep the
 same region, variables, and date interval: already-complete days are skipped,
 and incomplete days are fetched again. Start with a short interval before a
 long backfill. The notebook does not start a download until the execution cell
@@ -96,8 +98,8 @@ access to the public bucket. Partition updates are serialized and atomically
 replaced while the lake writer lock is held, so parallel reads cannot race to
 overwrite a daily file.
 
-Install `.[weather,notebooks]` to include the Zarr v3 and GCS filesystem
-dependencies required by `run_bulk`. The CDS downloader remains available and
+Install `.[weather,notebooks]` to include the compatible Zarr v2/xarray and GCS
+filesystem dependencies required by `run_bulk`. The CDS downloader remains available and
 continues to use the CDS account credentials described above.
 
 `west > east` denotes an antimeridian-crossing box. The scraper splits it into
@@ -107,7 +109,7 @@ bounds are included. The native ERA5 model is approximately 31 km; the regular
 0.25-degree grid is its standard distribution grid. ERA5-Land is a separate
 product and is not mixed into this dataset.
 
-The supported CDS variable names are listed in `scrapers/era5.py:VARIABLES`:
+The supported CDS variable names are listed in `scrapers/era5/regional.py:VARIABLES`:
 temperature, dew point, 10 m and 100 m wind components, surface pressure, downward
 solar radiation, cloud cover, and precipitation. Each variable is requested
 separately, keeping NetCDF field and unit interpretation explicit.

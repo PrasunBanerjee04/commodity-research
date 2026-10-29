@@ -54,7 +54,9 @@ SCHEMA = {
 KEYS = ["timestamp", "latitude", "longitude", "variable"]
 logger = logging.getLogger(__name__)
 _NETCDF_LOCK = Lock()  # netCDF4/HDF5 decoding is not thread-safe.
-_ARCO_INDEX_LOCK = Lock()  # xarray/pandas label selection is unsafe on a shared dataset.
+_ARCO_INDEX_LOCK = (
+    Lock()
+)  # xarray/pandas label selection is unsafe on a shared dataset.
 
 
 VARIABLE_DIRECTORIES = {
@@ -72,7 +74,11 @@ VARIABLE_DIRECTORIES = {
 
 
 def _partition(root: Path, day: date, variable: str = "2m_temperature") -> Path:
-    return root / VARIABLE_DIRECTORIES[variable] / f"year={day:%Y}/month={day:%m}/day={day:%d}/data.parquet"
+    return (
+        root
+        / VARIABLE_DIRECTORIES[variable]
+        / f"year={day:%Y}/month={day:%m}/day={day:%d}/data.parquet"
+    )
 
 
 def _validate(frame: pl.DataFrame, day: date):
@@ -86,8 +92,10 @@ def _validate(frame: pl.DataFrame, day: date):
         | (pl.col("timestamp").dt.second() != 0)
         | (pl.col("timestamp").dt.microsecond() != 0)
         | ~pl.col("latitude").is_between(-90, 90)
-        | ~pl.col("latitude").is_finite() | ~pl.col("longitude").is_finite()
-        | (pl.col("longitude") < -180) | (pl.col("longitude") >= 180)
+        | ~pl.col("latitude").is_finite()
+        | ~pl.col("longitude").is_finite()
+        | (pl.col("longitude") < -180)
+        | (pl.col("longitude") >= 180)
         | ~pl.col("value").is_finite()
         | ((pl.col("latitude") * 4) != (pl.col("latitude") * 4).round())
         | ((pl.col("longitude") * 4) != (pl.col("longitude") * 4).round())
@@ -96,14 +104,21 @@ def _validate(frame: pl.DataFrame, day: date):
         raise ValueError("Invalid hourly UTC ERA5 observations or coordinates")
     if frame.select(KEYS).is_duplicated().any():
         raise ValueError("Duplicate ERA5 observation keys")
-    if frame.group_by("variable").agg(pl.col("unit").n_unique()).filter(pl.col("unit") != 1).height:
+    if (
+        frame.group_by("variable")
+        .agg(pl.col("unit").n_unique())
+        .filter(pl.col("unit") != 1)
+        .height
+    ):
         raise ValueError("A variable cannot mix physical units")
 
 
 def _selection(frame, grid, variables):
-    return frame.filter(pl.col("latitude").is_in(grid.latitudes)
-                        & pl.col("longitude").is_in(grid.longitudes)
-                        & pl.col("variable").is_in(variables))
+    return frame.filter(
+        pl.col("latitude").is_in(grid.latitudes)
+        & pl.col("longitude").is_in(grid.longitudes)
+        & pl.col("variable").is_in(variables)
+    )
 
 
 def _complete(frame, grid, variables):
@@ -116,10 +131,15 @@ def _normalize(path: Path, variable: str, area, day: date) -> pl.DataFrame:
     with _NETCDF_LOCK:
         if zipfile.is_zipfile(path):
             with zipfile.ZipFile(path) as archive:
-                entries = [entry for entry in archive.infolist()
-                           if not entry.is_dir() and entry.filename.lower().endswith(".nc")]
+                entries = [
+                    entry
+                    for entry in archive.infolist()
+                    if not entry.is_dir() and entry.filename.lower().endswith(".nc")
+                ]
                 if len(entries) != 1:
-                    raise ValueError("Expected one NetCDF field per CDS variable request")
+                    raise ValueError(
+                        "Expected one NetCDF field per CDS variable request"
+                    )
                 with tempfile.TemporaryDirectory(prefix="era5-netcdf-") as directory:
                     unpacked = Path(directory) / "field.nc"
                     unpacked.write_bytes(archive.read(entries[0]))
@@ -132,9 +152,15 @@ def _decode_netcdf(path: Path, variable: str, area, day: date) -> pl.DataFrame:
     import xarray as xr
 
     with xr.open_dataset(path, engine="netcdf4") as dataset:
-        names = [name for name in (*VARIABLES[variable], variable) if name in dataset.data_vars]
+        names = [
+            name
+            for name in (*VARIABLES[variable], variable)
+            if name in dataset.data_vars
+        ]
         if len(names) != 1:
-            raise ValueError(f"Expected one {variable} field in the CDS NetCDF response")
+            raise ValueError(
+                f"Expected one {variable} field in the CDS NetCDF response"
+            )
         values = dataset[names[0]]
         unit = values.attrs.get("units")
         if not isinstance(unit, str) or not unit.strip():
@@ -167,32 +193,46 @@ def _decode_netcdf(path: Path, variable: str, area, day: date) -> pl.DataFrame:
         ):
             raise ValueError("CDS response does not contain exactly 24 UTC hours")
         latitudes = np.asarray(values.latitude.values, dtype="float64")
-        longitudes = (np.asarray(values.longitude.values, dtype="float64") + 180) % 360 - 180
-        if len(np.unique(latitudes)) != len(latitudes) or len(np.unique(longitudes)) != len(longitudes):
+        longitudes = (
+            np.asarray(values.longitude.values, dtype="float64") + 180
+        ) % 360 - 180
+        if len(np.unique(latitudes)) != len(latitudes) or len(
+            np.unique(longitudes)
+        ) != len(longitudes):
             raise ValueError("Duplicate CDS coordinate values")
         north, west, south, east = area
         expected_lat = np.arange(round(south * 4), round(north * 4) + 1) / 4
-        expected_lon = np.unique((np.arange(round(west * 4), round(east * 4) + 1) / 4 + 180) % 360 - 180)
-        if not np.array_equal(np.sort(latitudes), expected_lat) or not np.array_equal(np.sort(longitudes), expected_lon):
+        expected_lon = np.unique(
+            (np.arange(round(west * 4), round(east * 4) + 1) / 4 + 180) % 360 - 180
+        )
+        if not np.array_equal(np.sort(latitudes), expected_lat) or not np.array_equal(
+            np.sort(longitudes), expected_lon
+        ):
             raise ValueError("CDS response does not match the requested native grid")
         data = np.asarray(values.values, dtype="float64")
         cells = len(latitudes) * len(longitudes)
-        frame = pl.DataFrame({
-            "timestamp": np.repeat(times.astype("datetime64[us]"), cells),
-            "latitude": np.tile(np.repeat(latitudes, len(longitudes)), 24),
-            "longitude": np.tile(longitudes, 24 * len(latitudes)),
-            "variable": [variable] * (24 * cells),
-            "value": data.reshape(-1),
-            "unit": [unit] * (24 * cells),
-        }).with_columns(pl.col("timestamp").dt.replace_time_zone("UTC"))
+        frame = pl.DataFrame(
+            {
+                "timestamp": np.repeat(times.astype("datetime64[us]"), cells),
+                "latitude": np.tile(np.repeat(latitudes, len(longitudes)), 24),
+                "longitude": np.tile(longitudes, 24 * len(latitudes)),
+                "variable": [variable] * (24 * cells),
+                "value": data.reshape(-1),
+                "unit": [unit] * (24 * cells),
+            }
+        ).with_columns(pl.col("timestamp").dt.replace_time_zone("UTC"))
     _validate(frame, day)
     return frame
 
 
-def _normalize_arco(dataset, variable: str, grid: WeatherGrid, day: date) -> pl.DataFrame:
+def _normalize_arco(
+    dataset, variable: str, grid: WeatherGrid, day: date
+) -> pl.DataFrame:
     import numpy as np
 
-    names = [name for name in (*VARIABLES[variable], variable) if name in dataset.data_vars]
+    names = [
+        name for name in (*VARIABLES[variable], variable) if name in dataset.data_vars
+    ]
     if len(names) != 1:
         raise ValueError(f"Expected one {variable} field in the ARCO ERA5 store")
     values = dataset[names[0]]
@@ -232,25 +272,33 @@ def _normalize_arco(dataset, variable: str, grid: WeatherGrid, day: date) -> pl.
         ).transpose(*wanted)
     times = np.asarray(values[time_name].values)
     expected_times = np.datetime64(day, "us") + np.arange(24) * np.timedelta64(1, "h")
-    if (not np.issubdtype(times.dtype, np.datetime64) or np.isnat(times).any()
-            or not np.array_equal(times.astype("datetime64[us]"), expected_times)):
+    if (
+        not np.issubdtype(times.dtype, np.datetime64)
+        or np.isnat(times).any()
+        or not np.array_equal(times.astype("datetime64[us]"), expected_times)
+    ):
         raise ValueError("ARCO ERA5 response does not contain exactly 24 UTC hours")
 
     latitudes = np.asarray(values.latitude.values, dtype="float64")
-    longitudes = (np.asarray(values.longitude.values, dtype="float64") + 180) % 360 - 180
-    if (not np.array_equal(latitudes, grid.latitudes)
-            or not np.array_equal(longitudes, grid.longitudes)):
+    longitudes = (
+        np.asarray(values.longitude.values, dtype="float64") + 180
+    ) % 360 - 180
+    if not np.array_equal(latitudes, grid.latitudes) or not np.array_equal(
+        longitudes, grid.longitudes
+    ):
         raise ValueError("ARCO ERA5 response does not match the requested native grid")
     data = np.asarray(values.values, dtype="float64")
     cells = len(latitudes) * len(longitudes)
-    frame = pl.DataFrame({
-        "timestamp": np.repeat(times.astype("datetime64[us]"), cells),
-        "latitude": np.tile(np.repeat(latitudes, len(longitudes)), 24),
-        "longitude": np.tile(longitudes, 24 * len(latitudes)),
-        "variable": [variable] * (24 * cells),
-        "value": data.reshape(-1),
-        "unit": [unit] * (24 * cells),
-    }).with_columns(pl.col("timestamp").dt.replace_time_zone("UTC"))
+    frame = pl.DataFrame(
+        {
+            "timestamp": np.repeat(times.astype("datetime64[us]"), cells),
+            "latitude": np.tile(np.repeat(latitudes, len(longitudes)), 24),
+            "longitude": np.tile(longitudes, 24 * len(latitudes)),
+            "variable": [variable] * (24 * cells),
+            "value": data.reshape(-1),
+            "unit": [unit] * (24 * cells),
+        }
+    ).with_columns(pl.col("timestamp").dt.replace_time_zone("UTC"))
     _validate(frame, day)
     return frame
 
@@ -276,15 +324,21 @@ class ERA5Scraper:
     """Pull a WeatherGrid from CDS or ARCO and upsert it into shared daily Parquet."""
 
     def __init__(
-        self, grid: WeatherGrid, *, variables=("2m_temperature",),
+        self,
+        grid: WeatherGrid,
+        *,
+        variables=("2m_temperature",),
         lake_root: Path | str = DEFAULT_LAKE_ROOT,
-        raw_root: Path | str = DEFAULT_RAW_ROOT, workers: int = 2,
-        keep_raw: bool = False, client_factory=None,
+        raw_root: Path | str = DEFAULT_RAW_ROOT,
+        workers: int = 2,
+        keep_raw: bool = False,
+        client_factory=None,
     ):
         if not isinstance(grid, WeatherGrid):
             raise TypeError("grid must be a WeatherGrid")
         if isinstance(variables, str):
-            raise ValueError("variables must be a sequence of CDS variable names")
+            # Preserve the existing validation exception for callers.
+            raise ValueError("variables must be a sequence of CDS variable names")  # noqa: TRY004
         variables = tuple(dict.fromkeys(variables))
         if not variables or any(v not in VARIABLES for v in variables):
             raise ValueError(f"Choose variables from {sorted(VARIABLES)}")
@@ -302,13 +356,22 @@ class ERA5Scraper:
             import cdsapi
             import requests
         except ImportError as error:
-            raise RuntimeError("Install weather dependencies: python -m pip install -e '.[weather]'") from error
+            raise RuntimeError(
+                "Install weather dependencies: python -m pip install -e '.[weather]'"
+            ) from error
 
         session = requests.Session()
         try:
-            return cdsapi.Client(url=CDS_URL, quiet=True, progress=False,
-                                 timeout=120, retry_max=5, sleep_max=60, verify=True,
-                                 session=session)
+            return cdsapi.Client(
+                url=CDS_URL,
+                quiet=True,
+                progress=False,
+                timeout=120,
+                retry_max=5,
+                sleep_max=60,
+                verify=True,
+                session=session,
+            )
         except Exception as error:
             session.close()
             raise RuntimeError(
@@ -318,20 +381,34 @@ class ERA5Scraper:
 
     def _fetch(self, day, variable, area, refresh=False):
         request = {
-            "product_type": ["reanalysis"], "variable": [variable],
-            "year": [f"{day:%Y}"], "month": [f"{day:%m}"], "day": [f"{day:%d}"],
+            "product_type": ["reanalysis"],
+            "variable": [variable],
+            "year": [f"{day:%Y}"],
+            "month": [f"{day:%m}"],
+            "day": [f"{day:%d}"],
             "time": [f"{hour:02d}:00" for hour in range(24)],
-            "area": list(area), "grid": [0.25, 0.25],
-            "data_format": "netcdf", "download_format": "unarchived",
+            "area": list(area),
+            "grid": [0.25, 0.25],
+            "data_format": "netcdf",
+            "download_format": "unarchived",
         }
-        fingerprint = hashlib.sha256(json.dumps(request, sort_keys=True).encode()).hexdigest()
-        target = self.raw_root / VARIABLE_DIRECTORIES[variable] / f"{day:%Y/%m/%d}" / f"{fingerprint}.nc"
+        fingerprint = hashlib.sha256(
+            json.dumps(request, sort_keys=True).encode()
+        ).hexdigest()
+        target = (
+            self.raw_root
+            / VARIABLE_DIRECTORIES[variable]
+            / f"{day:%Y/%m/%d}"
+            / f"{fingerprint}.nc"
+        )
         target.parent.mkdir(parents=True, exist_ok=True)
         downloaded = 0
         if refresh or not target.exists():
             temporary = None
             try:
-                with tempfile.NamedTemporaryFile(dir=target.parent, suffix=".partial", delete=False) as stream:
+                with tempfile.NamedTemporaryFile(
+                    dir=target.parent, suffix=".partial", delete=False
+                ) as stream:
                     temporary = Path(stream.name)
                 client = self.client_factory()
                 try:
@@ -359,15 +436,26 @@ class ERA5Scraper:
         ``workers`` bounds both in-flight requests and active daily batches.
         Only the calling thread writes Parquet; dates may finish out of order.
         """
-        if (not isinstance(start, date) or isinstance(start, datetime)
-                or not isinstance(end, date) or isinstance(end, datetime)
-                or start < date(1940, 1, 1) or start >= end
-                or end > datetime.now(timezone.utc).date()):
-            raise ValueError("Use date objects with 1940-01-01 <= start < end <= today (UTC); end is exclusive")
+        if (
+            not isinstance(start, date)
+            or isinstance(start, datetime)
+            or not isinstance(end, date)
+            or isinstance(end, datetime)
+            or start < date(1940, 1, 1)
+            or start >= end
+            or end > datetime.now(timezone.utc).date()
+        ):
+            raise ValueError(
+                "Use date objects with 1940-01-01 <= start < end <= today (UTC); end is exclusive"
+            )
         summary = RunSummary()
         if self.raw_root == self.lake_root:
             raise ValueError("raw_root and lake_root must be different directories")
-        with writer_lock(self.raw_root), writer_lock(self.lake_root), ThreadPoolExecutor(max_workers=self.workers) as executor:
+        with (
+            writer_lock(self.raw_root),
+            writer_lock(self.lake_root),
+            ThreadPoolExecutor(max_workers=self.workers) as executor,
+        ):
             plans = self._plan_days(start, end, refresh, summary)
             batches = {}
             ready = deque()
@@ -390,7 +478,9 @@ class ERA5Scraper:
                     day = ready.popleft()
                     batch = batches[day]
                     variable, area = batch.jobs.popleft()
-                    pending[executor.submit(self._fetch, day, variable, area, refresh)] = day
+                    pending[
+                        executor.submit(self._fetch, day, variable, area, refresh)
+                    ] = day
                     if batch.jobs:
                         ready.append(day)
 
@@ -431,11 +521,18 @@ class ERA5Scraper:
         completed partitions. Existing complete partitions are skipped unless
         refreshing.
         """
-        if (not isinstance(start, date) or isinstance(start, datetime)
-                or not isinstance(end, date) or isinstance(end, datetime)
-                or start < date(1940, 1, 1) or start >= end
-                or end > datetime.now(timezone.utc).date()):
-            raise ValueError("Use date objects with 1940-01-01 <= start < end <= today (UTC); end is exclusive")
+        if (
+            not isinstance(start, date)
+            or isinstance(start, datetime)
+            or not isinstance(end, date)
+            or isinstance(end, datetime)
+            or start < date(1940, 1, 1)
+            or start >= end
+            or end > datetime.now(timezone.utc).date()
+        ):
+            raise ValueError(
+                "Use date objects with 1940-01-01 <= start < end <= today (UTC); end is exclusive"
+            )
         if not isinstance(store_url, str) or not store_url.strip():
             raise ValueError("store_url must be a nonempty string")
 
@@ -459,7 +556,10 @@ class ERA5Scraper:
             import xarray as xr
 
             options = {"token": "anon"} if storage_options is None else storage_options
-            with xr.open_zarr(store_url, chunks=None, storage_options=options) as dataset:
+            with xr.open_zarr(
+                store_url, chunks=None, storage_options=options
+            ) as dataset:
+
                 def fetch_day(item):
                     requested_day, existing = item
                     incoming = pl.concat(
@@ -487,7 +587,11 @@ class ERA5Scraper:
                         for future in completed:
                             futures.pop(future)
                             day, existing, incoming = future.result()
-                            merged = pl.concat([existing, incoming]) if existing is not None else incoming
+                            merged = (
+                                pl.concat([existing, incoming])
+                                if existing is not None
+                                else incoming
+                            )
                             merged = merged.unique(subset=KEYS, keep="last").sort(KEYS)
                             _validate(merged, day)
                             self._write_day(merged, day)
@@ -495,7 +599,9 @@ class ERA5Scraper:
                             summary.received_rows += incoming.height
                             logger.info(
                                 "SAVED %s from ARCO Zarr: %d incoming rows; %d total rows",
-                                day, incoming.height, merged.height,
+                                day,
+                                incoming.height,
+                                merged.height,
                             )
 
                             try:
@@ -534,10 +640,16 @@ class ERA5Scraper:
                 _validate(existing, day)
                 if not refresh and _complete(existing, self.grid, self.variables):
                     summary.skipped_days += 1
-                    logger.info("SKIP %s: all requested grid observations already present", day)
+                    logger.info(
+                        "SKIP %s: all requested grid observations already present", day
+                    )
                     day += timedelta(days=1)
                     continue
-            jobs = deque((variable, area) for variable in self.variables for area in self.grid.cds_areas)
+            jobs = deque(
+                (variable, area)
+                for variable in self.variables
+                for area in self.grid.cds_areas
+            )
             logger.info("FETCH %s: %s, %d CDS requests", day, self.grid.name, len(jobs))
             yield _DayBatch(day, existing, jobs, len(jobs))
             day += timedelta(days=1)
@@ -547,16 +659,22 @@ class ERA5Scraper:
         day, existing, results = batch.day, batch.existing, batch.results
         incoming = pl.concat([result[0] for result in results])
         # Antimeridian requests can both return the +/-180 boundary.
-        conflicts = incoming.group_by(KEYS).agg(
-            pl.col("value").n_unique().alias("values"),
-            pl.col("unit").n_unique().alias("units"),
-        ).filter((pl.col("values") != 1) | (pl.col("units") != 1))
+        conflicts = (
+            incoming.group_by(KEYS)
+            .agg(
+                pl.col("value").n_unique().alias("values"),
+                pl.col("unit").n_unique().alias("units"),
+            )
+            .filter((pl.col("values") != 1) | (pl.col("units") != 1))
+        )
         if conflicts.height:
             raise ValueError("Conflicting observations in the same CDS response batch")
         incoming = incoming.unique(subset=KEYS, keep="last")
         _validate(incoming, day)
         if not _complete(incoming, self.grid, self.variables):
-            raise ValueError("Incomplete ERA5 grid coverage; daily partition was not changed")
+            raise ValueError(
+                "Incomplete ERA5 grid coverage; daily partition was not changed"
+            )
         merged = pl.concat([existing, incoming]) if existing is not None else incoming
         merged = merged.unique(subset=KEYS, keep="last").sort(KEYS)
         _validate(merged, day)
@@ -567,4 +685,9 @@ class ERA5Scraper:
         summary.downloaded_requests += sum(result[2] for result in results)
         summary.written_days += 1
         summary.received_rows += incoming.height
-        logger.info("SAVED %s: %d incoming rows; %d total rows", day, incoming.height, merged.height)
+        logger.info(
+            "SAVED %s: %d incoming rows; %d total rows",
+            day,
+            incoming.height,
+            merged.height,
+        )

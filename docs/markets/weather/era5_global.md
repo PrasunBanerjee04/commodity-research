@@ -1,5 +1,7 @@
 # Global hourly ERA5 temperature
 
+See the [package map](era5/README.md) for the regional/global split and migration notes.
+
 Fetch global **2 m air temperature only** from Google's public
 [ARCO ERA5 mirror](https://github.com/google-research/arco-era5), starting on
 **2000-01-01** by default. No API token, CDS account, or cloud credentials are
@@ -39,7 +41,9 @@ Edit `START_DATE`, `END_DATE`, `LAKE_ROOT`, `WORKERS`, and `MIN_FREE_GB` near th
 top of `markets/weather/era5.py` if you prefer running the file without flags.
 Python callers can import that module and call `run(start=..., end=...)`.
 All retrieval, normalization, and orchestration live in
-`markets/weather/scrapers/era5/`.
+`markets/weather/scrapers/era5/global_temperature/`.
+The grouped CLI `python -m comm_research.markets.weather.scrapers.era5` is
+equivalent to the existing entrypoint.
 
 ## Lake layout and fields
 
