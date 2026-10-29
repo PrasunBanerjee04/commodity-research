@@ -14,6 +14,7 @@ from types import ModuleType
 CAISO = "comm_research.markets.power_gas.napg.caiso"
 WEATHER = "comm_research.markets.weather"
 ALIASES = {
+    WEATHER + ".scrapers.era5_global": WEATHER + ".scrapers.era5.global_temperature",
     "comm_research.infra.scrapers.caiso.oasis.models": CAISO
     + ".scrapers.oasis.reports",
     "comm_research.infra.scrapers.caiso.oasis": CAISO + ".scrapers.oasis",
@@ -59,19 +60,31 @@ class _LegacyFinder(importlib.abc.MetaPathFinder):
             return importlib.util.spec_from_loader(
                 fullname, _AliasLoader(None), is_package=True
             )
-        for old, new in ALIASES.items():
-            if fullname == old or fullname.startswith(old + "."):
-                canonical = new + fullname[len(old) :]
-                spec = importlib.util.find_spec(canonical)
-                if spec is None:
-                    return None
-                return importlib.util.spec_from_loader(
-                    fullname,
-                    _AliasLoader(canonical, spec),
-                    origin=spec.origin,
-                    is_package=spec.submodule_search_locations is not None,
-                )
-        return None
+        canonical = fullname
+        seen = set()
+        # Flatten chained prefixes (infra.scrapers.weather -> weather.scrapers
+        # -> era5.global_temperature) before obtaining the canonical spec.
+        while canonical not in seen:
+            seen.add(canonical)
+            for old in sorted(ALIASES, key=len, reverse=True):
+                if canonical == old or canonical.startswith(old + "."):
+                    canonical = ALIASES[old] + canonical[len(old) :]
+                    break
+            else:
+                break
+        else:
+            raise ImportError(f"Circular compatibility alias for {fullname}")
+        if canonical == fullname:
+            return None
+        spec = importlib.util.find_spec(canonical)
+        if spec is None:
+            return None
+        return importlib.util.spec_from_loader(
+            fullname,
+            _AliasLoader(canonical, spec),
+            origin=spec.origin,
+            is_package=spec.submodule_search_locations is not None,
+        )
 
 
 def install():

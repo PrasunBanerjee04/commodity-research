@@ -13,8 +13,8 @@ from pathlib import Path
 from unittest.mock import patch
 
 from comm_research.markets.weather import era5
-from comm_research.markets.weather.scrapers.era5_global import pipeline
-from comm_research.markets.weather.scrapers.era5_global.client import (
+from comm_research.markets.weather.scrapers.era5.global_temperature import pipeline
+from comm_research.markets.weather.scrapers.era5.global_temperature.client import (
     ERA5Client, HTTPStore, SourceError, SourceInfo,
 )
 

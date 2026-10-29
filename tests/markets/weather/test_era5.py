@@ -14,7 +14,7 @@ from unittest.mock import patch
 import polars as pl
 
 from comm_research.markets.weather.models.grid import WeatherGrid
-from comm_research.markets.weather.scrapers import era5
+from comm_research.markets.weather.scrapers.era5 import regional as era5
 
 HAS_WEATHER = all(importlib.util.find_spec(name) for name in ("numpy", "xarray", "netCDF4"))
 
@@ -451,7 +451,7 @@ class ERA5Tests(unittest.TestCase):
                         LAKE_ROOT=str(self.root/'lake'),
                     )
                     configured = True
-        self.assertEqual(len([cell for cell in notebook.cells if cell.cell_type == "code"]), 2)
+        self.assertEqual(len([cell for cell in notebook.cells if cell.cell_type == "code"]), 3)
         self.assertEqual(namespace['summary'].written_days, 1)
         self.assertEqual(self.read().height, 96)
 
@@ -563,7 +563,13 @@ class ERA5Tests(unittest.TestCase):
         self.assertLessEqual(peak, 2)
         self.assertEqual(len(started), 14)
         self.assertEqual(result.written_days, 7)
-        self.assertEqual(len(published), 7)
+        # Each UTC day publishes one partition for each requested variable.
+        self.assertEqual(len(published), 14)
+        by_day = {}
+        for target in published:
+            by_day.setdefault(tuple(target.parts[-4:-1]), set()).add(target.parents[3].name)
+        self.assertEqual(len(by_day), 7)
+        self.assertTrue(all(variables == {"t_2m", "dewpoint_2m"} for variables in by_day.values()))
 
     def test_skipped_days_do_not_occupy_download_window(self):
         self.scraper().run(self.day, date(2000, 1, 4))

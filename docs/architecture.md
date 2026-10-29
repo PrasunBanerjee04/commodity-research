@@ -43,8 +43,10 @@ src/comm_research/
 │   ├── ags/
 │   └── weather/
 │       └── scrapers/
-│           ├── ecmwf.py
-│           └── era5.py
+│           ├── ecmwf/             # Forecast-ingestion scaffold
+│           └── era5/
+│               ├── regional.py
+│               └── global_temperature/
 └── dashboard/
     ├── server.py
     ├── app.py
@@ -84,15 +86,17 @@ under the matching taxonomy inside the shared UI asset tree. Compatibility JS
 URLs at the old root locations only re-export the canonical modules.
 
 All scraper modules belong to their market's `scrapers/` package. The weather
-`ecmwf.py` and `era5.py` placeholders live in `markets/weather/scrapers/`;
+`ecmwf/` scaffold and `era5/` ingestion package live in `markets/weather/scrapers/`;
 there is no physical `infra/scrapers/` directory. Shared HTTP and lake tooling
 remain under `infra/http/` and `infra/lake/`.
 
 Legacy `comm_research.infra.scrapers.weather` imports, including its `ecmwf`
-and `era5` modules, resolve lazily to the same market-owned module objects
+and `era5` packages, resolve lazily to the same market-owned module objects
 through `_compat.py`. The legacy `infra.scrapers` namespace is virtual, so
 existing imports continue to work without maintaining duplicate scraper files
-or loading market code when shared infrastructure is imported.
+or loading market code when shared infrastructure is imported. See the
+[ERA5 package map](markets/weather/era5/README.md) for regional/global ownership,
+storage formats, compatibility imports, and install requirements.
 
 ## CAISO imports and entrypoints
 

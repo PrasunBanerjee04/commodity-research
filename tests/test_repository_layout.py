@@ -24,7 +24,7 @@ class RepositoryLayoutTests(unittest.TestCase):
                 module = importlib.import_module(
                     f"comm_research.markets.weather.scrapers.{name}"
                 )
-                self.assertEqual(Path(module.__file__), weather / f"{name}.py")
+                self.assertEqual(Path(module.__file__), weather / name / "__init__.py")
 
     def test_weather_legacy_imports_share_modules_in_either_import_order(self):
         # Fresh interpreters exercise both finder routes without sys.modules
@@ -51,13 +51,19 @@ assert era5 is importlib.import_module(canonical + '.era5')
 print(json.dumps([ecmwf.__name__, era5.__name__]))
 """
                 result = subprocess.run(
-                    [sys.executable, "-c", program], cwd=ROOT,
-                    capture_output=True, text=True, check=True,
+                    [sys.executable, "-c", program],
+                    cwd=ROOT,
+                    capture_output=True,
+                    text=True,
+                    check=True,
                 )
-                self.assertEqual(json.loads(result.stdout), [
-                    "comm_research.markets.weather.scrapers.ecmwf",
-                    "comm_research.markets.weather.scrapers.era5",
-                ])
+                self.assertEqual(
+                    json.loads(result.stdout),
+                    [
+                        "comm_research.markets.weather.scrapers.ecmwf",
+                        "comm_research.markets.weather.scrapers.era5",
+                    ],
+                )
 
     def test_legacy_aliases_preserve_identity_specs_and_mutable_settings(self):
         from comm_research._compat import ALIASES
