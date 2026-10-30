@@ -39,7 +39,7 @@ class PackageAPITests(unittest.TestCase):
         subprocess.run([sys.executable, "-c", """
 import sys
 import comm_research
-from comm_research import common, infra, markets, dashboard
+from comm_research import common, infra, markets
 from comm_research.infra.tools import vis
 assert not {'plotly', 'matplotlib', 'polars', 'numpy', 'duckdb', 'fastapi'} & sys.modules.keys()
 assert 'plot_timeseries' in dir(vis)

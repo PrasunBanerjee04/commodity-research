@@ -140,8 +140,6 @@ print(json.dumps([ecmwf.__name__, era5.__name__]))
             ["-m", CAISO + ".caiso_oasis_pipeline", "--help"],
             ["-m", CAISO + ".pipelines.backfill", "--help"],
             [str(ROOT / "scripts/fetch_caiso.py"), "--help"],
-            [str(ROOT / "server.py"), "--help"],
-            [str(ROOT / "app.py"), "--help"],
         ]:
             with self.subTest(args=args):
                 result = subprocess.run(

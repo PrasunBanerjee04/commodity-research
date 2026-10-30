@@ -7,7 +7,6 @@ from comm_research._exports import lazy_exports as _lazy_exports
 
 _EXPORTS = {
     'analytics': ('.analytics', None),
-    'dashboard': ('.dashboard', None),
     'models': ('.models', None),
     'pipelines': ('.pipelines', None),
     'scrapers': ('.scrapers', None),

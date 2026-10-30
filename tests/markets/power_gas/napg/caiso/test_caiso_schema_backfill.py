@@ -11,7 +11,6 @@ from urllib.error import HTTPError
 
 import polars as pl
 
-from comm_research.dashboard.data import loader
 from comm_research.infra.lake.writer_lock import writer_lock
 from comm_research.markets.power_gas.napg.caiso.pipelines import backfill as cli
 from comm_research.markets.power_gas.napg.caiso.transforms.schema import (
@@ -107,109 +106,6 @@ class SchemaTests(unittest.TestCase):
         )
         with self.assertRaises(pl.exceptions.ComputeError):
             normalize_schema(ambiguous.lazy(), "rtm_lmp").collect()
-
-    def test_mixed_case_files_wide_prices_and_empty_default_horizon(self):
-        with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory)
-            feed = root / "power_gas/napg/caiso/rtm_lmp"
-            feed.mkdir(parents=True)
-            raw = pl.DataFrame(
-                {
-                    "INTERVALSTARTTIME_GMT": ["2023-07-08T07:00:00Z"],
-                    "NODE": ["SP15"],
-                    "LMP": ["25.0"],
-                    "ENERGY": ["23.0"],
-                    "CONGESTION": ["3.0"],
-                    "LOSSES": ["-1.0"],
-                }
-            )
-            raw.write_ipc(feed / "old.arrow")
-            raw.rename({c: c.lower() for c in raw.columns}).write_parquet(
-                feed / "old.parquet"
-            )
-            loader.clear_caches()
-            dataset = loader.discover_lake(str(root))[0]
-            metadata = loader.inspect_dataset(dataset)
-            self.assertEqual(
-                {signal.component for signal in metadata.signals},
-                {"LMP", "ENERGY", "CONG", "LOSS"},
-            )
-            bundle = loader.load_series(
-                dataset,
-                date(2026, 9, 1),
-                date(2026, 9, 30),
-                "UTC",
-                ("LMP",),
-                (("node", ("SP15",)),),
-                fallback_to_latest=True,
-            )
-            self.assertEqual(bundle.points, 1)
-            self.assertEqual(
-                bundle.fallback_horizon, (date(2023, 7, 8), date(2023, 7, 8))
-            )
-            manual = loader.load_series(
-                dataset, date(2026, 9, 1), date(2026, 9, 30), "UTC", ("LMP",)
-            )
-            self.assertEqual(manual.points, 0)
-            empty = loader.load_series(
-                dataset,
-                date(2026, 9, 1),
-                date(2026, 9, 30),
-                "UTC",
-                ("LMP",),
-                (("node", ()),),
-                fallback_to_latest=True,
-            )
-            self.assertEqual(empty.points, 0)
-
-    def test_latest_fallback_survives_misdated_hive_partitions(self):
-        with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory)
-            feed = root / "power_gas/napg/caiso/rtm_lmp"
-            for day, timestamp, node in (
-                (7, "2026-10-07T07:00:00Z", "NP15"),
-                (8, "2023-07-08T07:00:00Z", "SP15"),
-            ):
-                path = feed / f"year=2026/month=10/day={day:02d}/data.parquet"
-                path.parent.mkdir(parents=True)
-                pl.DataFrame(
-                    {
-                        "INTERVALSTARTTIME_GMT": [timestamp],
-                        "NODE": [node],
-                        "LMP_TYPE": ["LMP"],
-                        "VALUE": [25.0],
-                    }
-                ).write_parquet(path)
-            loader.clear_caches()
-            dataset = loader.discover_lake(str(root))[0]
-            bundle = loader.load_series(
-                dataset,
-                date(2026, 9, 8),
-                date(2026, 10, 7),
-                "UTC",
-                ("value:LMP",),
-                (("node", ("SP15",)),),
-                fallback_to_latest=True,
-            )
-            self.assertEqual(bundle.points, 1)
-            self.assertEqual(bundle.plot["timestamp"][0].date(), date(2023, 7, 8))
-
-    def test_all_pnodes_are_searchable_beyond_old_option_limit(self):
-        with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory)
-            feed = root / "caiso/rtm_lmp"
-            feed.mkdir(parents=True)
-            pl.DataFrame(
-                {
-                    "timestamp": [datetime(2026, 9, 1, tzinfo=timezone.utc)] * 6001,
-                    "node": [f"N{index:05d}" for index in range(6001)],
-                    "lmp_type": ["LMP"] * 6001,
-                    "value": [1.0] * 6001,
-                }
-            ).write_parquet(feed / "data.parquet")
-            loader.clear_caches()
-            dataset = loader.discover_lake(str(root))[0]
-            self.assertEqual(len(loader.dimension_options(dataset, "node")), 6001)
 
 
 class FakeClient:
