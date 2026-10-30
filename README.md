@@ -13,8 +13,7 @@ A Python workspace for commodity data, analytics, and market-specific research. 
 | `notebooks/` | Research and visualizations |
 | `src/comm_research/infra/` | Shared HTTP, lake storage, locking, and path infrastructure |
 | `src/comm_research/common/` | Analytics shared across markets: math, curves, and models |
-| `src/comm_research/markets/` | Market-owned scrapers, transforms, pipelines, models, analytics, and query adapters |
-| `src/comm_research/dashboard/` | Shared dashboard server, chart engines, and workspace UI |
+| `src/comm_research/markets/` | Market-owned scrapers, transforms, pipelines, models, and analytics |
 
 See [repository architecture](docs/architecture.md) for ownership rules, the new
 scaffolds, canonical imports, and compatibility paths. Local data and `.env` are

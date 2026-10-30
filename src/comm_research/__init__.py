@@ -11,7 +11,6 @@ from comm_research._exports import lazy_exports as _lazy_exports
 
 _EXPORTS = {
     'common': ('.common', None),
-    'dashboard': ('.dashboard', None),
     'infra': ('.infra', None),
     'markets': ('.markets', None),
 }

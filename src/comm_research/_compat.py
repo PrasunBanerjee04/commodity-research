@@ -2,7 +2,7 @@
 
 Canonical code never imports these paths. Aliases share module identity, which
 preserves pipeline globals, monkeypatching, dataclasses, and the CAISO request
-gate. No market or optional dashboard dependency loads until a caller asks.
+gate. No market or optional dependency loads until a caller asks.
 """
 
 import importlib
@@ -25,7 +25,6 @@ ALIASES = {
     "comm_research.infra.tools.parquet_formatter": "comm_research.infra.lake.parquet",
     "comm_research.infra.tools.lake_methods": "comm_research.infra.lake",
     CAISO + ".caiso_oasis_pipeline": CAISO + ".pipelines.oasis",
-    "comm_research.dashboard.research_lake": CAISO + ".dashboard.research",
 }
 NAMESPACES = {"comm_research.infra.scrapers"}
 
