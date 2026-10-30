@@ -1,8 +1,9 @@
-"""Archive discovery and deterministic selection, using real coordinate NetCDF."""
-from datetime import date, datetime, timezone
+"""Archive discovery and deterministic selection, using DAP2 coordinate payloads."""
+from datetime import date, datetime, timedelta, timezone
 import importlib.util
 from pathlib import Path
 import tempfile
+import struct
 import unittest
 from unittest.mock import patch
 from urllib.error import URLError
@@ -79,25 +80,58 @@ class PlanningTests(unittest.TestCase):
 
 @unittest.skipUnless(importlib.util.find_spec('netCDF4'), 'Install .[ecmwf] for catalogue checks')
 class CatalogueTests(unittest.TestCase):
-    def coordinate(self, dates):
-        import netCDF4 as nc
-        with tempfile.TemporaryDirectory() as directory:
-            path = Path(directory)/'coordinate.nc'
-            with nc.Dataset(path, mode='w') as ds:
-                ds.createDimension('S', len(dates))
-                var = ds.createVariable('S', 'f8', ('S',))
-                var.units = 'hours since 1960-01-01 00:00:00'
-                var[:] = nc.date2num([datetime.combine(d, datetime.min.time()) for d in dates], var.units)
-            return path.read_bytes()
+    attributes = b'Attributes { S { String units "days since 1960-01-01"; } }'
+
+    def coordinate(self, dates, dtype="Float32"):
+        values = [(d - date(1960, 1, 1)).days for d in dates]
+        descriptor = f"Dataset {{\n    {dtype} S[S = {len(dates)}];\n}} 2m_above_ground;\nData:\n"
+        code = "f" if dtype == "Float32" else "d"
+        return (descriptor.encode() + struct.pack(">II", len(dates), len(dates))
+                + struct.pack(f">{len(dates)}{code}", *values))
 
     def test_cycle_links_and_coordinate_decoding(self):
         self.assertEqual(catalogue.cycles_from_html(b'<a href=".CY48/">48</a><a href="/x/.CY49/">49</a>'), ['CY48', 'CY49'])
         with self.assertRaises(ValueError):
             catalogue.cycles_from_html(b'<html>Sign in</html>')
         dates = [date(2024, 1, 4), date(2024, 2, 29)]
-        self.assertEqual(catalogue.dates_from_netcdf(self.coordinate(dates)), set(dates))
-        with self.assertRaises(ValueError):
-            catalogue.dates_from_netcdf(b'<html>Sign in</html>')
+        self.assertEqual(catalogue.dates_from_dap(self.coordinate(dates), self.attributes), set(dates))
+        with self.assertRaisesRegex(RuntimeError, 'HTML instead'):
+            catalogue.dates_from_dap(b'<html>Sign in</html>', self.attributes)
+
+    def test_reported_iri_prefix_and_das_metadata(self):
+        # Live IRI response supplied by the user: actual first 80 bytes and DAS.
+        # The remainder is synthetic, using the paper's published cycle schedule.
+        dates = []
+        day = date(2015, 5, 14)
+        while day <= date(2022, 12, 29):
+            if day.weekday() in (0, 3) and (day.month, day.day) != (2, 29):
+                dates.append(day)
+            day += timedelta(days=1)
+        self.assertEqual(len(dates), 796)
+        data = self.coordinate(dates).replace(b"} 2m_above_ground;", b"} 2t;")
+        fixtures = Path(__file__).parent/'fixtures'
+        prefix = bytes.fromhex((fixtures/'ecmwf_iri_s.prefix.hex').read_text())
+        self.assertEqual(data[:len(prefix)], prefix)
+        attributes = (fixtures/'ecmwf_iri_s.das').read_bytes()
+        self.assertEqual(catalogue.dates_from_dap(data, attributes), set(dates))
+
+    def test_dap_lengths_projection_units_and_midnight_are_validated(self):
+        dates = [date(2015, 5, 14), date(2022, 12, 29)]
+        payload = self.coordinate(dates)
+        self.assertEqual(catalogue.dates_from_dap(self.coordinate(dates, "Float64"), self.attributes), set(dates))
+        for bad in (payload[:-1], payload + b"extra", payload.replace(b"S[S = 2]", b"S[S = 3]"),
+                    payload.replace(b"Float32 S", b"Float32 2t"),
+                    payload.split(b"\nData:\n")[0] + b"\nData:\n" + struct.pack(">IIff", 2, 1, 100, 200),
+                    payload.split(b"\nData:\n")[0] + b"\nData:\n" + struct.pack(">IIff", 2, 2, float('nan'), 200),
+                    payload.split(b"\nData:\n")[0] + b"\nData:\n" + struct.pack(">IIff", 2, 2, 100.5, 200)):
+            with self.subTest(payload=bad[:60]):
+                with self.assertRaises(ValueError):
+                    catalogue.dates_from_dap(bad, self.attributes)
+        with self.assertRaisesRegex(ValueError, 'no time units'):
+            catalogue.dates_from_dap(payload, b'Attributes { S { String name "S"; } }')
+        # Units must come from S, not from another axis such as lead time LA.
+        attributes = b'Attributes { LA { String units "hours"; } S { String units "days since 1960-01-01"; } }'
+        self.assertEqual(catalogue.dates_from_dap(payload, attributes), set(dates))
 
     def test_discovery_intersects_members_and_caps_as_of(self):
         cf = self.coordinate([date(2024, 1, 4), date(2024, 1, 8), date(2027, 1, 4)])
@@ -105,6 +139,9 @@ class CatalogueTests(unittest.TestCase):
         def fetch(url, cache, refresh=False):
             if url.endswith('index.html'):
                 return b'<a href=".CY48/">cycle</a>'
+            if url.endswith('dods.das'):
+                return self.attributes
+            self.assertTrue(url.endswith('dods.dods?S'))
             return cf if '/.control/' in url else pf
         with tempfile.TemporaryDirectory() as directory, patch.object(catalogue, 'fetch', side_effect=fetch):
             result = catalogue.discover(cache=directory, as_of=date(2026, 1, 1))

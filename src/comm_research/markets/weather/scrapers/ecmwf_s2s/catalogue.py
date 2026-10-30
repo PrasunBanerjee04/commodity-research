@@ -12,10 +12,12 @@ import json
 import math
 import os
 import re
+import struct
 import tempfile
 import time
 from concurrent.futures import ThreadPoolExecutor
 from datetime import date
+from html import unescape
 from html.parser import HTMLParser
 from http.cookiejar import Cookie, CookieJar
 from pathlib import Path
@@ -136,8 +138,8 @@ def fetch(url, cache, refresh=False):
             if (urlparse(response.geturl()).path.startswith("/auth/")
                     or re.search(rb"<title[^>]*>\s*dlauth\s*</title>", data[:8192], re.I)):
                 raise RuntimeError(AUTH_HELP)
-            if url.endswith("data.nc") and "html" in response.headers.get("Content-Type", "").lower():
-                raise RuntimeError("IRI returned HTML instead of coordinate NetCDF; check the catalogue endpoint/access")
+            if url.endswith("data.nc") or "/dods." in url:
+                reject_html(data, response.headers.get("Content-Type", ""))
     except (URLError, OSError) as error:
         if getattr(error, "code", None) == 401:
             raise RuntimeError(AUTH_HELP) from None
@@ -149,6 +151,20 @@ def fetch(url, cache, refresh=False):
     if not data or len(data) > MAX_BYTES:
         raise ValueError(f"Invalid or oversized catalogue response: {url}")
     return data
+
+
+def reject_html(data, content_type=""):
+    """IRI can label an HTTP-200 HTML error page as application/x-netcdf."""
+    prefix = data[:8192].lstrip().lower()
+    if ("html" in content_type.lower() or prefix.startswith((b"<html", b"<!doctype html"))):
+        match = re.search(rb"<title[^>]*>(.*?)</title>", data[:8192], re.I | re.S)
+        title = ""
+        if match:
+            title = unescape(re.sub(r"<[^>]+>", "", match[1].decode(errors="replace")))
+            title = " ".join(title.split())[:120]
+        raise RuntimeError(
+            "IRI returned HTML instead of catalogue data" + (f" ({title})" if title else "")
+            + "; the catalogue endpoint/access must be checked. HTTP status and Content-Type are insufficient.")
 
 
 def cache_validated(url, data, cache):
@@ -190,31 +206,57 @@ def cycles_from_html(data):
     return sorted(parser.cycles)
 
 
-def dates_from_netcdf(data):
-    from netCDF4 import Dataset, num2date
+def dates_from_dap(data, attributes):
+    """Decode a DAP2 projection containing only Float32/Float64 S[S=N].
 
-    try:
-        with Dataset("iri-coordinate", memory=data) as dataset:
-            coordinate = dataset.variables["S"]
-            if coordinate.ndim != 1 or len(coordinate) == 0:
-                raise ValueError("Expected a nonempty one-dimensional issuance coordinate S")
-            values = coordinate[:]
-            if any(not math.isfinite(float(v)) for v in values) or bool(values.mask.any()):
-                raise ValueError("Missing/nonfinite issuance coordinates")
-            decoded = num2date(values, coordinate.units,
-                              calendar=getattr(coordinate, "calendar", "standard"))
-            if any(d.hour or d.minute or d.second for d in decoded):
-                raise ValueError("Expected 00 UTC issuance dates")
-            return {date(d.year, d.month, d.day) for d in decoded}
-    except (OSError, KeyError, AttributeError) as error:
-        raise ValueError("Invalid IRI issuance NetCDF; check access/terms and catalogue structure") from error
+    Numeric DAP2 arrays are XDR: two big-endian length words followed by values.
+    Reject ignored projections, truncated arrays, HTML errors and nonfinite
+    values. Reading S directly avoids Ingrid's grid-to-NetCDF exporter.
+    """
+    from netCDF4 import num2date
+
+    reject_html(data)
+    reject_html(attributes)
+    delimiter = re.search(rb"\r?\nData:\r?\n", data)
+    if delimiter is None:
+        raise ValueError("IRI response lacks the DAP2 Data delimiter")
+    descriptor = data[:delimiter.start()].decode("ascii")
+    coordinate = re.fullmatch(
+        r"\s*Dataset\s*\{\s*(Float32|Float64)\s+S\s*\[\s*S\s*=\s*(\d+)\s*\]\s*;"
+        r"\s*\}\s*[^;]+;\s*", descriptor)
+    if coordinate is None:
+        raise ValueError("IRI ignored the ?S projection or returned an unexpected coordinate schema")
+    dtype, count = coordinate[1], int(coordinate[2])
+    payload = data[delimiter.end():]
+    width, code = (4, "f") if dtype == "Float32" else (8, "d")
+    if count < 1 or len(payload) != 8 + count * width:
+        raise ValueError("Incomplete or oversized IRI DAP2 issuance array")
+    if struct.unpack(">II", payload[:8]) != (count, count):
+        raise ValueError("IRI DAP2 array lengths disagree with its descriptor")
+    values = struct.unpack(f">{count}{code}", payload[8:])
+    if not all(math.isfinite(v) for v in values):
+        raise ValueError("Missing/nonfinite issuance coordinates")
+    # S is a top-level coordinate in IRI's DDS/DAS, separate from the 2t grid.
+    metadata = attributes.decode("utf-8")
+    block = re.search(r"(?:^|[{};])\s*S\s*\{([^{}]*)\}", metadata, re.S)
+    if block is None:
+        raise ValueError("IRI DAS metadata does not describe coordinate S")
+    units = re.search(r'String\s+units\s+("(?:[^"\\]|\\.)*")\s*;', block[1])
+    calendar = re.search(r'String\s+calendar\s+("(?:[^"\\]|\\.)*")\s*;', block[1])
+    if units is None:
+        raise ValueError("IRI S coordinate has no time units")
+    decoded = num2date(values, json.loads(units[1]),
+                      calendar=json.loads(calendar[1]) if calendar else "standard")
+    if any(d.hour or d.minute or d.second or d.microsecond for d in decoded):
+        raise ValueError("Expected 00 UTC issuance dates")
+    return {date(d.year, d.month, d.day) for d in decoded}
 
 
 def discover(*, cache, as_of, workers=2, refresh=False, cycles=None):
     """Return reference_date -> model_cycle from common control/perturbed axes.
 
-    The Ingrid S/data.nc transform selects only the issuance coordinate, not
-    global weather fields. NetCDF parsing is serial (libnetcdf is not thread safe).
+    DAP2 ?S projects only the standalone issuance array exposed by IRI's DDS;
+    dods.das supplies its units. No global temperature array is downloaded.
     Network reads use bounded parallelism. Fail closed if any cycle cannot load.
     """
     index_url = ROOT + "index.html"
@@ -226,14 +268,17 @@ def discover(*, cache, as_of, workers=2, refresh=False, cycles=None):
     if not cycles or any(not re.fullmatch(r"CY\d+(?:-\d+)?", c) for c in cycles):
         raise ValueError("catalogue_cycles must contain IRI cycle names such as CY48")
     selections = [(cycle, member) for cycle in cycles for member in ("control", "perturbed")]
-    urls = [f"{ROOT}.{cycle}/.reforecast/.{member}/.2m_above_ground/.2t/S/data.nc"
-            for cycle, member in selections]
+    bases = [f"{ROOT}.{cycle}/.reforecast/.{member}/.2m_above_ground/.2t/"
+             for cycle, member in selections]
+    urls = [base + suffix for base in bases for suffix in ("dods.dods?S", "dods.das")]
     with ThreadPoolExecutor(max_workers=workers) as pool:
         payloads = list(pool.map(lambda url: fetch(url, cache, refresh), urls))
     dates = {}
-    for selection, url, data in zip(selections, urls, payloads):
-        dates[selection] = dates_from_netcdf(data)
-        cache_validated(url, data, cache)
+    for index, selection in enumerate(selections):
+        data, attributes = payloads[2*index:2*index+2]
+        dates[selection] = dates_from_dap(data, attributes)
+        for url, payload in zip(urls[2*index:2*index+2], (data, attributes)):
+            cache_validated(url, payload, cache)
     references = {}
     for cycle in cycles:
         for reference in dates[cycle, "control"] & dates[cycle, "perturbed"]:
