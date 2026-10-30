@@ -6,6 +6,7 @@ Edit _EXPORTS to expose additional modules or helpers; imports load on demand.
 from comm_research._exports import lazy_exports as _lazy_exports
 
 _EXPORTS = {
+    "gefs": (".gefs", None),
     "era5_global": (".era5.global_temperature", None),
     "ecmwf": (".ecmwf", None),
     "era5": (".era5", None),
