@@ -130,12 +130,16 @@ class ReforecastTests(unittest.TestCase):
                             finally:
                                 ec.codes_release(g)
                 gribs.append(path)
-            options = dict(targets=targets, reference_dates=[date(2024, 1, 4)],
+            options = dict(targets=targets, reference_dates=[date(2023, 1, 4), date(2024, 1, 4)],
                            output=root/'out', raw=root/'raw')
             with patch.object(pipeline.Client, 'retrieve', side_effect=gribs) as retrieve:
                 result = pipeline.run(**options)
                 self.assertEqual(retrieve.call_count, 2)
                 self.assertEqual(result['matched_weeks'], 1)
+                self.assertEqual(result['coverage']['status'].to_list(), ['completed'])
+                self.assertEqual(result['coverage']['reference_date'].to_list(), [date(2024, 1, 4)])
+                self.assertEqual(pl.read_parquet(root/'out/files.parquet')['path'].to_list(),
+                                 [str(result['files'][0].resolve())])
                 output = pl.read_parquet(result['files'][0])
                 self.assertEqual(output['control'][0], 299)
                 self.assertAlmostEqual(output['perturbed_10'][0], 309)
