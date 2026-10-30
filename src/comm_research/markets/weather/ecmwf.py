@@ -9,8 +9,14 @@ OUTPUT = PROJECT_ROOT / "data/lake/weather/ecmwf/s2s/t_2m"
 RAW = PROJECT_ROOT / "data/raw/weather/ecmwf/s2s"
 
 
-def run(*, reference_dates, **overrides):
-    """Pull selected associated issuances; use dry_run=True to inspect coverage.
+def run(*, reference_dates=None, **overrides):
+    """Discover archive issuances and select one reforecast per target week.
+
+    reference_dates=None discovers IRI's published control/perturbed issuance
+    axes. An explicit list bypasses discovery. dry_run=True returns a detailed
+    plan without downloading forecast fields. as_of caps associated issuance
+    dates; selection is retrospective (newest eligible model vintage).
+
 
     Requires .[ecmwf], an ECMWF account with S2S terms accepted, and Web API
     authentication configured externally (e.g. ~/.ecmwfapirc). Never pass secrets
