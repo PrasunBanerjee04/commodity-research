@@ -1,5 +1,4 @@
 """IRI login redirects and scoped, private PyCPT-compatible authentication."""
-import io
 import json
 import os
 from pathlib import Path
@@ -31,10 +30,21 @@ class IRIAuthTests(unittest.TestCase):
                 catalogue.fetch(catalogue.ROOT, directory)
             self.assertEqual(list(Path(directory).iterdir()), [])
 
+    def test_mislabeled_netcdf_error_page_is_rejected_and_not_cached(self):
+        body = b'<html><head><title>Error 404Bad Request</title></head><body>error</body></html>'
+        bad = response(body, catalogue.ROOT+'S/data.nc', 'application/x-netcdf')
+        with tempfile.TemporaryDirectory() as directory, \
+             patch.object(catalogue, 'open_catalogue', return_value=bad):
+            with self.assertRaisesRegex(RuntimeError, 'Error 404Bad Request'):
+                catalogue.fetch(catalogue.ROOT+'S/data.nc', directory)
+            self.assertEqual(list(Path(directory).iterdir()), [])
+        with self.assertRaisesRegex(RuntimeError, 'Error 404Bad Request'):
+            catalogue.dates_from_dap(body, b"")
+
     def test_unexpected_html_has_a_distinct_error(self):
         with tempfile.TemporaryDirectory() as directory, \
              patch.object(catalogue, 'open_catalogue', return_value=response(b'<title>Not found</title>')):
-            with self.assertRaisesRegex(RuntimeError, 'HTML instead of coordinate NetCDF'):
+            with self.assertRaisesRegex(RuntimeError, 'HTML instead of catalogue data'):
                 catalogue.fetch(catalogue.ROOT+'S/data.nc', directory)
 
     def test_reads_pycpt_file_and_process_binding_without_disclosing_values(self):
