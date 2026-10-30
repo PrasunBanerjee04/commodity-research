@@ -112,13 +112,13 @@ class CatalogueTests(unittest.TestCase):
 
     def test_network_denial_is_not_cached_and_fresh_cache_is_reused(self):
         with tempfile.TemporaryDirectory() as directory:
-            with patch.object(catalogue, 'urlopen', side_effect=URLError('403 Forbidden')) as request:
+            with patch.object(catalogue, 'open_catalogue', side_effect=URLError('403 Forbidden')) as request:
                 with self.assertRaisesRegex(RuntimeError, 'No dates were guessed'):
                     catalogue.fetch(catalogue.ROOT, directory)
                 self.assertEqual(list(Path(directory).iterdir()), [])
             data = self.coordinate([date(2024, 1, 4)])
             catalogue.cache_validated(catalogue.ROOT, data, directory)
-            with patch.object(catalogue, 'urlopen') as request:
+            with patch.object(catalogue, 'open_catalogue') as request:
                 self.assertEqual(catalogue.fetch(catalogue.ROOT, directory), data)
                 request.assert_not_called()
 

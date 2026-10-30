@@ -3,6 +3,7 @@ from __future__ import annotations
 
 from comm_research.infra.paths import PROJECT_ROOT
 from comm_research.markets.weather.scrapers.ecmwf_s2s.pipeline import run as _run
+from comm_research.markets.weather.scrapers.ecmwf_s2s.catalogue import setup_iri_auth
 
 TARGETS = PROJECT_ROOT / "data/clean/weather/era5/t_2m/socal"
 OUTPUT = PROJECT_ROOT / "data/lake/weather/ecmwf/s2s/t_2m"
