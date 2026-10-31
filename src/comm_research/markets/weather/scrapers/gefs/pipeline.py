@@ -107,8 +107,11 @@ def run(*, targets, output, raw, state, start=None, end=None, lead_days=26, work
                     skipped += 1
                 else:
                     def member_job(member):
-                        path, source = client.download(key_for(initialization, member), steps, refresh=refresh)
-                        mean, values, grid = normalize(path, initialization, member, points, steps)
+                        try:
+                            path, source = client.download(key_for(initialization, member), steps, refresh=refresh)
+                            mean, values, grid = normalize(path, initialization, member, points, steps)
+                        except ValueError as error:
+                            raise ValueError(f"GEFS target={week}, initialization={initialization}, member={member}: {error}") from error
                         return mean, values, grid, path, source
                     # A single pool limits combined network and decode concurrency.
                     futures = [pool.submit(member_job, member) for member in MEMBERS]

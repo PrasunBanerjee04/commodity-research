@@ -23,10 +23,14 @@ class CatalogueTests(unittest.TestCase):
                 b'65:14991371:d=2000010500:TMP:2 m above ground:630 hour fcst:ENS=low-res ctl\n')
         records = client.parse_index(body)
         self.assertEqual(client.byte_range(records, [624]), (14754689, 14991370))
+        variants = b'1:0:d=2000010500:TMP:2 m above ground:26 day fcst:ENS=1\n2:100:d=2000010500:TMP:2 m above ground:630 hours fcst:ENS=1\n'
+        self.assertEqual(client.parse_index(variants), [(0, 624), (100, 630)])
         self.assertEqual(catalogue.forecast_hours(26), list(range(624, 792, 6)))
         self.assertEqual(len(catalogue.forecast_hours(26)), 28)
-        with self.assertRaises(ValueError):
+        with self.assertRaisesRegex(ValueError, r"missing=\[636.*duplicate=\[\]"):
             client.byte_range(records, catalogue.forecast_hours(26))
+        with self.assertRaisesRegex(ValueError, r"missing=\[\], duplicate=\[624\]"):
+            client.byte_range([(0, 624), (100, 624), (200, 630)], [624, 630])
         for value in (True, 15, 29, 26.0):
             with self.assertRaises(ValueError): catalogue.forecast_hours(value)
 
@@ -80,6 +84,8 @@ class GEFSIntegrationTests(unittest.TestCase):
                 messages.append(message); offset += len(message)
             key = catalogue.key_for(initialization, member)
             cls.objects[key] = b''.join(messages)
+            if member == 'p01':
+                cls.incomplete_p01 = b''.join(message for hour, message in zip(range(246,841,6), messages) if hour != 624)
             cls.objects[key+'.idx'] = ''.join(lines).encode()
 
     def setUp(self):
@@ -108,6 +114,12 @@ class GEFSIntegrationTests(unittest.TestCase):
         if body is None or (self.mode == 'missing-member' and '/p10/' in key):
             return httpx.Response(404)
         if key.endswith('.idx'):
+            if self.mode in ('bad-index', 'missing-grib-step') and '/p01/' in key:
+                body = b'\n'.join(line for line in body.splitlines() if b':624 hour fcst:' not in line)+b'\n'
+            return httpx.Response(200, content=body)
+        if 'range' not in request.headers:
+            if self.mode == 'missing-grib-step' and '/p01/' in key:
+                body = self.incomplete_p01
             return httpx.Response(200, content=body)
         if self.mode == 'ignore-range':
             return httpx.Response(200, content=body)
@@ -203,6 +215,28 @@ class GEFSIntegrationTests(unittest.TestCase):
         self.mode = 'five-members'
         report = catalogue.plan(catalogue.targets_from_csv(self.targets), source, 26, refresh=True)
         self.assertFalse(report['matched'][0])
+
+    def test_incomplete_index_recovers_from_complete_grib_without_losing_samples(self):
+        self.mode = 'bad-index'
+        with patch.object(pipeline, 'Client', side_effect=self.make_client):
+            result = gefs.run(**self.options(), dry_run=False)
+        self.assertEqual(result['coverage']['status'].to_list(), ['completed'])
+        path = Path(result['files'][0]['weekly_path'])
+        info = json.loads((path.parent/'manifest.json').read_text())
+        fallback = [source for source in info['sources'] if source['download_mode'] == 'full_file']
+        self.assertEqual(len(fallback), 1)
+        self.assertIn('/p01/', fallback[0]['key'])
+        self.assertIn('missing=[624]', fallback[0]['index_issue'])
+        samples = pl.read_parquet(result['files'][0]['samples_path'])
+        self.assertEqual(samples.filter(pl.col('member') == 'p01')['forecast_hour'].n_unique(), 28)
+
+    def test_full_file_fallback_still_rejects_genuinely_missing_samples(self):
+        self.mode = 'missing-grib-step'
+        with patch.object(pipeline, 'Client', side_effect=self.make_client):
+            with self.assertRaisesRegex(ValueError, r'target=2000-01-31.*member=p01.*missing hours \[624\]'):
+                gefs.run(**self.options(), dry_run=False)
+        self.assertFalse(list((self.root/'lake').rglob('weekly.parquet')))
+        self.assertEqual(pl.read_parquet(self.root/'state/coverage.parquet')['status'].to_list(), ['planned'])
 
     def test_interrupted_transfer_retries_without_publishing_partial_bytes(self):
         import httpx
