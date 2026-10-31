@@ -64,7 +64,12 @@ def plan(targets, client, lead_days, *, workers=4, refresh=False):
             if records is None:
                 reason = "No listed extended-range control temperature index"
             else:
-                byte_range(records, steps)  # Verify all required control forecast hours.
+                try:
+                    byte_range(records, steps)
+                except ValueError as error:
+                    # Metadata alone cannot rule out actual GRIB fields. The
+                    # downloader checks the full file before classifying a gap.
+                    logger.warning("GEFS control index for %s needs full-file verification: %s", initialization, error)
         return dict(timestamp=week, initialization_date=initialization,
                     matched=not reason, status="unmatched" if reason else "planned", reason=reason)
     rows, remaining = [], iter(weeks)
