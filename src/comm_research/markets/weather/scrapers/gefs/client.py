@@ -1,6 +1,7 @@
 """Anonymous, pooled NOAA S3 reads with indexed GRIB byte-range caching."""
 from __future__ import annotations
 
+from collections import Counter
 from contextlib import closing
 
 import hashlib
@@ -40,9 +41,9 @@ def parse_index(body):
         offset = int(parts[1])
         if offset < 0 or (records and offset <= records[-1][0]):
             raise ValueError("Unordered/duplicate NOAA GRIB offsets")
-        match = re.fullmatch(r"(\d+) hour fcst", parts[5].strip())
-        step = (int(match[1]) if match and parts[3] == "TMP"
-                and parts[4] == "2 m above ground" else None)
+        match = re.fullmatch(r"(\d+) (hours?|hrs?|days?) fcst", parts[5].strip())
+        step = (int(match[1]) * (24 if match[2].startswith("day") else 1)
+                if match and parts[3] == "TMP" and parts[4] == "2 m above ground" else None)
         records.append((offset, step))
     if not records:
         raise ValueError("Empty NOAA GRIB index")
@@ -51,8 +52,16 @@ def parse_index(body):
 
 def byte_range(records, steps):
     selected = [(i, step) for i, (_, step) in enumerate(records) if step in steps]
-    if sorted(step for _, step in selected) != sorted(steps):
-        raise ValueError("NOAA index lacks exactly one 2m temperature field per requested forecast hour")
+    counts = Counter(step for _, step in selected)
+    missing = sorted(set(steps)-counts.keys())
+    duplicate = sorted(step for step, count in counts.items() if count > 1)
+    if missing or duplicate:
+        recognized = [step for _, step in records if step is not None]
+        extent = f"{min(recognized)}..{max(recognized)}" if recognized else "none"
+        raise ValueError(
+            "NOAA index lacks exactly one 2m temperature field per requested forecast hour; "
+            f"missing={missing}, duplicate={duplicate}, recognized_hours={extent}, "
+            f"unrecognized_records={sum(step is None for _, step in records)}")
     first, last = selected[0][0], selected[-1][0]
     return records[first][0], records[last+1][0]-1 if last+1 < len(records) else None
 
@@ -146,8 +155,16 @@ class Client:
         records = self.index(key, refresh=refresh)
         if records is None:
             raise FileNotFoundError(f"Missing NOAA index: {key}.idx")
-        start, stop = byte_range(records, steps)
+        index_issue = None
+        try:
+            start, stop = byte_range(records, steps)
+        except ValueError as error:
+            index_issue = str(error)
+            start, stop = 0, None
+            logger.warning("GEFS index incomplete: %s.idx: %s; checking the full temperature file", key, error)
         identity = json.dumps([key, steps, records], sort_keys=True)
+        if index_issue:
+            identity += ":full-file-verification"
         path = self.raw / "grib" / (hashlib.sha256(identity.encode()).hexdigest() + ".grib2")
         manifest = path.with_suffix(".json")
         if path.exists() and manifest.exists() and not refresh:
@@ -171,13 +188,23 @@ class Client:
         digest, size = hashlib.sha256(), 0
         try:
             url = ROOT + quote(key, safe="/:")
-            with closing(self.response(url, {"Range": f"bytes={start}-{stop if stop is not None else ''}"})) as response:
+            headers = {} if index_issue else {"Range": f"bytes={start}-{stop if stop is not None else ''}"}
+            with closing(self.response(url, headers)) as response:
                 response.raise_for_status()
-                bounds = re.fullmatch(r"bytes (\d+)-(\d+)/(\d+)", response.headers.get("Content-Range", ""))
-                if (response.status_code != 206 or not bounds or int(bounds[1]) != start
-                        or int(bounds[2]) != (stop if stop is not None else int(bounds[3])-1)):
-                    raise ValueError("NOAA ignored or returned an invalid HTTP byte range")
-                expected = int(bounds[2])-start+1
+                if index_issue:
+                    if response.status_code != 200 or not response.headers.get("Content-Length", "").isdigit():
+                        raise ValueError("NOAA did not return a complete temperature-file response")
+                    expected = int(response.headers["Content-Length"])
+                    actual_end = expected-1
+                else:
+                    bounds = re.fullmatch(r"bytes (\d+)-(\d+)/(\d+)", response.headers.get("Content-Range", ""))
+                    if (response.status_code != 206 or not bounds or int(bounds[1]) != start
+                            or int(bounds[2]) != (stop if stop is not None else int(bounds[3])-1)):
+                        raise ValueError("NOAA ignored or returned an invalid HTTP byte range")
+                    actual_end = int(bounds[2])
+                    expected = actual_end-start+1
+                if expected <= 0 or shutil.disk_usage(path.parent).free < self.reserve + expected:
+                    raise OSError("Insufficient disk space for the GEFS temperature file and reserve")
                 with open(temporary, "wb") as stream:
                     for chunk in response.iter_bytes():
                         stream.write(chunk)
@@ -188,7 +215,9 @@ class Client:
                 if size != expected:
                     raise IncompleteDownload("Truncated NOAA byte-range response")
                 info = dict(key=key, url=url, etag=response.headers.get("ETag"),
-                            byte_range=[start, int(bounds[2])], bytes=size,
+                            byte_range=[start, actual_end], bytes=size,
+                            download_mode="full_file" if index_issue else "byte_range",
+                            index_issue=index_issue,
                             sha256=digest.hexdigest(), forecast_hours=list(steps), cached=False)
             with open(temporary, "rb") as stream:
                 if stream.read(4) != b"GRIB":
