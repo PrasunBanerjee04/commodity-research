@@ -48,6 +48,8 @@ def main(argv=None):
     parser.add_argument("--refresh", action="store_true")
     parser.add_argument("--refresh-catalogue", action="store_true")
     parser.add_argument("--keep-raw", action="store_true")
+    parser.add_argument("--on-incomplete", choices=("raise", "record"), default="raise",
+                        help="Stop on incomplete source data, or record the whole week as unavailable and continue")
     args = vars(parser.parse_args(argv))
     args["dry_run"] = not args.pop("download")
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")

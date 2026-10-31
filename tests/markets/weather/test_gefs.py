@@ -88,6 +88,24 @@ class GEFSIntegrationTests(unittest.TestCase):
                 cls.incomplete_p01 = b''.join(message for hour, message in zip(range(246,841,6), messages) if hour != 624)
             cls.objects[key+'.idx'] = ''.join(lines).encode()
 
+        # A second real-GRIB week verifies that record mode continues safely.
+        for key, body in list(cls.objects.items()):
+            other_key = key.replace('2000010500', '2000011200')
+            if key.endswith('.idx'):
+                cls.objects[other_key] = body.replace(b'2000010500', b'2000011200')
+            else:
+                import tempfile
+                with tempfile.TemporaryFile() as stream:
+                    stream.write(body); stream.seek(0)
+                    messages = []
+                    while (g := ec.codes_grib_new_from_file(stream)) is not None:
+                        try:
+                            ec.codes_set(g, 'dataDate', 20000112)
+                            messages.append(ec.codes_get_message(g))
+                        finally:
+                            ec.codes_release(g)
+                cls.objects[other_key] = b''.join(messages)
+
     def setUp(self):
         self.directory = tempfile.TemporaryDirectory()
         self.addCleanup(self.directory.cleanup)
@@ -114,11 +132,11 @@ class GEFSIntegrationTests(unittest.TestCase):
         if body is None or (self.mode == 'missing-member' and '/p10/' in key):
             return httpx.Response(404)
         if key.endswith('.idx'):
-            if self.mode in ('bad-index', 'missing-grib-step') and '/p01/' in key:
+            if self.mode in ('bad-index', 'missing-grib-step') and '/p01/' in key and '/2000010500/' in key:
                 body = b'\n'.join(line for line in body.splitlines() if b':624 hour fcst:' not in line)+b'\n'
             return httpx.Response(200, content=body)
         if 'range' not in request.headers:
-            if self.mode == 'missing-grib-step' and '/p01/' in key:
+            if self.mode == 'missing-grib-step' and '/p01/' in key and '/2000010500/' in key:
                 body = self.incomplete_p01
             return httpx.Response(200, content=body)
         if self.mode == 'ignore-range':
@@ -236,7 +254,45 @@ class GEFSIntegrationTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, r'target=2000-01-31.*member=p01.*missing hours \[624\]'):
                 gefs.run(**self.options(), dry_run=False)
         self.assertFalse(list((self.root/'lake').rglob('weekly.parquet')))
-        self.assertEqual(pl.read_parquet(self.root/'state/coverage.parquet')['status'].to_list(), ['planned'])
+        self.assertEqual(pl.read_parquet(self.root/'state/coverage.parquet')['status'].to_list(), ['unavailable'])
+
+    def test_record_mode_marks_whole_week_unavailable_and_continues(self):
+        self.mode = 'missing-grib-step'
+        frame = pl.read_csv(self.targets/'points.csv')
+        pl.concat([frame, frame.with_columns(pl.lit('2000-02-07T00:00:00Z').alias('timestamp'))]).write_csv(self.targets/'points.csv')
+        with patch.object(pipeline, 'Client', side_effect=self.make_client):
+            result = gefs.run(**self.options(), dry_run=False, on_incomplete='record')
+        self.assertEqual(result['unavailable'], 1)
+        self.assertEqual(result['downloaded'], 1)
+        self.assertEqual(result['coverage']['status'].to_list(), ['unavailable', 'completed'])
+        self.assertIn('member=p01', result['coverage']['reason'][0])
+        self.assertEqual(len(result['files']), 1)
+        weekly = pl.read_parquet(result['files'][0]['weekly_path'])
+        self.assertEqual(weekly['timestamp'].to_list(), [datetime(2000,2,7,tzinfo=timezone.utc)]*2)
+        self.assertEqual(pl.read_parquet(self.root/'state/files.parquet').height, 1)
+        self.assertEqual(pl.read_parquet(self.root/'state/coverage.parquet')['status'].to_list(), ['unavailable','completed'])
+
+    def test_early_forecast_file_reports_available_hours_without_filling(self):
+        import eccodes as ec
+        key = catalogue.key_for(date(2000,1,5), 'p06')
+        with tempfile.TemporaryFile() as stream:
+            stream.write(self.objects[key]); stream.seek(0)
+            messages = []
+            while (g := ec.codes_grib_new_from_file(stream)) is not None:
+                try:
+                    ec.codes_set(g, 'stepUnits', 1)
+                    if ec.codes_get(g, 'endStep') <= 384:
+                        messages.append(ec.codes_get_message(g))
+                finally:
+                    ec.codes_release(g)
+        path = self.root/'early.grib2'; path.write_bytes(b''.join(messages))
+        with self.assertRaises(normalizer.IncompleteForecastError) as caught:
+            normalizer.normalize(path, date(2000,1,5), 'p06', [(33.75,-119.25)], catalogue.forecast_hours(26))
+        self.assertEqual(caught.exception.missing_hours, catalogue.forecast_hours(26))
+        self.assertEqual(max(caught.exception.available_hours), 384)
+        # An identity mismatch must stay a validation error, not a skippable gap.
+        with self.assertRaisesRegex(ValueError, 'initialization/member'):
+            normalizer.normalize(path, date(2000,1,12), 'p06', [(33.75,-119.25)], catalogue.forecast_hours(26))
 
     def test_interrupted_transfer_retries_without_publishing_partial_bytes(self):
         import httpx
@@ -257,6 +313,29 @@ class GEFSIntegrationTests(unittest.TestCase):
         self.assertEqual(len(attempts), 2)
         self.assertTrue(path.exists())
         self.assertFalse(list((self.root/'raw').rglob('*.partial')))
+
+    def test_grib_day_and_six_hour_units_are_normalized_to_elapsed_hours(self):
+        import eccodes as ec
+        import numpy as np
+        key = catalogue.key_for(date(2000,1,5), 'c00')
+        with tempfile.TemporaryFile() as stream:
+            stream.write(self.objects[key]); stream.seek(0)
+            messages = []
+            while (g := ec.codes_grib_new_from_file(stream)) is not None:
+                try:
+                    ec.codes_set(g, 'stepUnits', 1)
+                    hour = int(ec.codes_get(g, 'endStep'))
+                    factor, unit = (24, 2) if hour % 24 == 0 else (6, 11)
+                    ec.codes_set(g, 'indicatorOfUnitOfTimeRange', unit)
+                    ec.codes_set(g, 'forecastTime', hour//factor)
+                    messages.append(ec.codes_get_message(g))
+                finally:
+                    ec.codes_release(g)
+        path = self.root/'time-units.grib2'; path.write_bytes(b''.join(messages))
+        mean, values, _ = normalizer.normalize(path, date(2000,1,5), 'c00', [(33.75,-119.25)], catalogue.forecast_hours(26))
+        expected = 270+33.75*.1-119.25*.01+np.mean(range(624,792,6))/10000
+        np.testing.assert_allclose(mean, [expected], atol=2e-5)
+        self.assertEqual(values['forecast_hour'].to_list(), catalogue.forecast_hours(26))
 
     def test_sparse_decoding_handles_noaa_complex_packing(self):
         import eccodes as ec

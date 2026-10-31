@@ -1,7 +1,7 @@
 """Resumable, grid-aware GEFSv12 temperature ingestion."""
 from __future__ import annotations
 
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import ThreadPoolExecutor, wait
 from datetime import datetime, time, timedelta, timezone
 import hashlib
 import json
@@ -16,7 +16,7 @@ import polars as pl
 from comm_research.infra.lake.writer_lock import writer_lock
 from .catalogue import MEMBERS, forecast_hours, key_for, plan, targets_from_csv
 from .client import Client, atomic_bytes
-from .normalizer import normalize
+from .normalizer import IncompleteForecastError, normalize
 
 logger = logging.getLogger(__name__)
 SCHEMA_VERSION = 1
@@ -55,15 +55,19 @@ def verified(manifest, fingerprint, weekly, samples):
 
 def run(*, targets, output, raw, state, start=None, end=None, lead_days=26, workers=4,
         retries=3, timeout=60, min_free_gb=2, keep_raw=False, refresh=False,
-        refresh_catalogue=False, dry_run=True):
+        refresh_catalogue=False, dry_run=True, on_incomplete="raise"):
     """Plan exact target weeks or fetch all eleven members using indexed ranges.
 
     Native six-hourly temperatures are sampled onto the requested coordinates.
     Weekly means use those same 28 instantaneous samples; they are not hourly
     means. Raw global slices are removed only after weekly and sample outputs
     are committed, unless keep_raw=True. Source details survive in manifests.
+    on_incomplete='record' omits whole weeks with validated but incomplete source
+    members, recording them as unavailable. Other validation/network errors raise.
     """
     steps = forecast_hours(lead_days)
+    if on_incomplete not in ("raise", "record"):
+        raise ValueError("on_incomplete must be 'raise' or 'record'")
     if isinstance(workers, bool) or not isinstance(workers, int) or not 1 <= workers <= 16:
         raise ValueError("workers must be an integer from 1 through 16")
     if isinstance(retries, bool) or not isinstance(retries, int) or not 0 <= retries <= 8:
@@ -85,7 +89,7 @@ def run(*, targets, output, raw, state, start=None, end=None, lead_days=26, work
             return coverage
         if not coverage["matched"].any():
             raise ValueError("No available GEFS extended runs match the requested target weeks")
-        paths, downloaded, skipped, transferred, rows_written = [], 0, 0, 0, 0
+        paths, downloaded, skipped, transferred, rows_written, unavailable = [], 0, 0, 0, 0, 0
         # Also lock raw: regional runs may share source files which are cleaned up.
         with writer_lock(output), writer_lock(raw), ThreadPoolExecutor(max_workers=workers) as pool:
             atomic_parquet(coverage, state / "coverage.parquet")
@@ -110,16 +114,42 @@ def run(*, targets, output, raw, state, start=None, end=None, lead_days=26, work
                         try:
                             path, source = client.download(key_for(initialization, member), steps, refresh=refresh)
                             mean, values, grid = normalize(path, initialization, member, points, steps)
+                        except IncompleteForecastError:
+                            raise
                         except ValueError as error:
                             raise ValueError(f"GEFS target={week}, initialization={initialization}, member={member}: {error}") from error
                         return mean, values, grid, path, source
                     # A single pool limits combined network and decode concurrency.
                     futures = [pool.submit(member_job, member) for member in MEMBERS]
+                    incomplete = None
                     try:
                         results = [future.result() for future in futures]
+                    except IncompleteForecastError as error:
+                        incomplete = error
                     finally:
                         for future in futures:
                             future.cancel()
+                        # Before changing loop variables, drain workers still using
+                        # this week's initialization/points in their closures.
+                        wait(futures)
+                    if incomplete is not None:
+                        for future in futures:
+                            if not future.cancelled():
+                                error = future.exception()
+                                if error is not None and not isinstance(error, IncompleteForecastError):
+                                    raise error
+                        reason = f"GEFS target={week}, initialization={initialization}, member={incomplete.member}: {incomplete}"
+                        coverage = coverage.with_columns(
+                            pl.when(pl.col("timestamp") == week).then(pl.lit("unavailable"))
+                            .otherwise(pl.col("status")).alias("status"),
+                            pl.when(pl.col("timestamp") == week).then(pl.lit(reason))
+                            .otherwise(pl.col("reason")).alias("reason"))
+                        atomic_parquet(coverage, state / "coverage.parquet")
+                        if on_incomplete == "raise":
+                            raise ValueError(reason) from incomplete
+                        unavailable += 1
+                        logger.warning("Recorded unavailable week; no partial output written: %s", reason)
+                        continue
                     if any(item[2] != results[0][2] for item in results):
                         raise ValueError("GEFS member grids differ")
                     weekly_frame = selected.with_columns(
@@ -156,6 +186,6 @@ def run(*, targets, output, raw, state, start=None, end=None, lead_days=26, work
                 atomic_parquet(coverage, state / "coverage.parquet")
                 atomic_parquet(pl.DataFrame(paths), state / "files.parquet")
         return dict(files=paths, coverage=coverage, downloaded=downloaded, skipped=skipped,
-                    bytes_downloaded=transferred, rows_written=rows_written)
+                    bytes_downloaded=transferred, rows_written=rows_written, unavailable=unavailable)
     finally:
         client.close()

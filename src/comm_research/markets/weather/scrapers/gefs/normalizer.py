@@ -4,6 +4,18 @@ from __future__ import annotations
 from datetime import datetime, time, timedelta, timezone
 
 
+class IncompleteForecastError(ValueError):
+    """A validated member file lacks requested hours; no weekly value is valid."""
+
+    def __init__(self, member, missing, available):
+        self.member = member
+        self.missing_hours = sorted(missing)
+        self.available_hours = sorted(available)
+        extent = f"{self.available_hours[0]}..{self.available_hours[-1]}" if self.available_hours else "none"
+        super().__init__(f"Incomplete GEFS member {member}: missing hours {self.missing_hours}; "
+                         f"available hours {extent} ({len(self.available_hours)} distinct steps)")
+
+
 def sampler(latitudes, longitudes, points):
     import numpy as np
 
@@ -43,17 +55,13 @@ def normalize(path, initialization, member, points, steps):
     import polars as pl
 
     expected_member = 0 if member == "c00" else int(member[1:])
-    samples, mapping, signature = {}, None, None
+    samples, mapping, signature, observed = {}, None, None, set()
     with open(path, "rb") as stream:
         while (g := ec.codes_grib_new_from_file(stream)) is not None:
             try:
                 ec.codes_set(g, "stepUnits", 1)
                 get = lambda key: ec.codes_get(g, key)
                 hour = int(get("endStep"))
-                if hour not in steps:
-                    continue
-                if hour in samples:
-                    raise ValueError(f"Duplicate GEFS forecast hour {hour}")
                 if (int(get("discipline")) != 0 or int(get("parameterCategory")) != 0
                         or int(get("parameterNumber")) != 0 or get("typeOfLevel") != "heightAboveGround"
                         or float(get("level")) != 2 or get("stepType") != "instant" or get("units") != "K"
@@ -62,6 +70,11 @@ def normalize(path, initialization, member, points, steps):
                 if (int(get("dataDate")) != int(initialization.strftime("%Y%m%d"))
                         or int(get("dataTime")) != 0 or int(get("perturbationNumber")) != expected_member):
                     raise ValueError("GEFS initialization/member differs from the requested source")
+                observed.add(hour)
+                if hour not in steps:
+                    continue
+                if hour in samples:
+                    raise ValueError(f"Duplicate GEFS forecast hour {hour}")
                 grid = tuple(get(k) for k in (
                     "Ni", "Nj", "latitudeOfFirstGridPointInDegrees", "longitudeOfFirstGridPointInDegrees",
                     "latitudeOfLastGridPointInDegrees", "longitudeOfLastGridPointInDegrees",
@@ -81,7 +94,9 @@ def normalize(path, initialization, member, points, steps):
             finally:
                 ec.codes_release(g)
     if set(samples) != set(steps):
-        raise ValueError(f"Incomplete GEFS member {member}: missing hours {sorted(set(steps)-samples.keys())}")
+        if not observed:
+            raise ValueError("GEFS file contains no decodable temperature messages")
+        raise IncompleteForecastError(member, set(steps)-samples.keys(), observed)
     values = np.vstack([samples[h] for h in steps])
     origin = datetime.combine(initialization, time(), timezone.utc)
     frame = pl.DataFrame({
