@@ -1,5 +1,4 @@
-/data/*
-!/data/clean/
+/data/
 /.env
 
 __pycache__/
