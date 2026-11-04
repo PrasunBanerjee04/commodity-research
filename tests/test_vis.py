@@ -25,6 +25,29 @@ class VisualizationTests(unittest.TestCase):
         self.assertEqual(fig.layout.paper_bgcolor, "white")
         self.assertIn('"type":"scatter"', fig.to_json())
 
+    def test_multiple_time_series_share_dates_and_preserve_gaps(self):
+        dates = ["2026-01-01", "2026-01-02", "2026-01-03"]
+        fig = plot_timeseries(dates, [[1, None, 3], [2, 3, 4]])
+        self.assertEqual(len(fig.data), 2)
+        self.assertEqual(list(fig.data[0].y), [1, None, 3])
+        self.assertEqual(list(fig.data[1].y), [2, 3, 4])
+        for trace in fig.data:
+            self.assertEqual(list(trace.x), dates)
+            self.assertFalse(trace.connectgaps)
+        self.assertTrue(fig.layout.showlegend)
+
+    @unittest.skipUnless(importlib.util.find_spec("pandas"), "Install pandas")
+    def test_dataframe_series_use_column_names_as_labels(self):
+        import pandas as pd
+
+        df = pd.DataFrame({"actual": [1, 2], "forecast": [3, 4]})
+        dates = ["2026-01-01", "2026-01-02"]
+        fig = plot_timeseries(dates, [df["actual"], df["forecast"]])
+        self.assertEqual([trace.name for trace in fig.data], ["actual", "forecast"])
+        self.assertEqual(list(fig.data[1].y), [3, 4])
+        fig = plot_timeseries(dates, df["actual"], name="Observed")
+        self.assertEqual(fig.data[0].name, "Observed")
+
     def test_nested_styles_restore_after_exception_without_global_changes(self):
         import plotly.io as pio
 
