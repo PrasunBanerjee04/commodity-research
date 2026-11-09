@@ -8,7 +8,9 @@ from comm_research._exports import lazy_exports as _lazy_exports
 _EXPORTS = {
     'ags': ('.ags', None),
     'oil': ('.oil', None),
-    'power_gas': ('.power_gas', None),
+    'power': ('.power', None),
+    'gas': ('.gas', None),
+    'metals': ('.metals', None),
     'weather': ('.weather', None),
 }
 

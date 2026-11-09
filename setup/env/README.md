@@ -1,0 +1,1 @@
+Create the virtual environment at the project root with `python -m venv .venv`. Install with `.venv/bin/python -m pip install -r setup/requirements.txt`. Keep credentials out of source control; existing root `.env` and provider home-directory credentials continue to work.

@@ -1,0 +1,1 @@
+-e ./setup[weather,era5,ecmwf,gefs,vis,notebooks]

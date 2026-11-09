@@ -1,6 +1,6 @@
 import numpy as np
 
-from comm_research.common.models.regression import ols
+from comm_research.models.regression import ols
 from sklearn.isotonic import IsotonicRegression
 
 class PCB:

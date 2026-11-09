@@ -8,3 +8,9 @@ build/
 dist/
 .venv/
 node_modules/
+
+/setup/.env
+/setup/env/*
+!/setup/env/README.md
+/setup/build/
+/setup/dist/
