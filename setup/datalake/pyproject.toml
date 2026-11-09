@@ -1,0 +1,47 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "datalake"
+version = "0.2.0"
+description = "Simple access to the existing local Parquet and CSV data lake"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = ["polars>=1.30,<2"]
+
+[project.optional-dependencies]
+pandas = ["pandas>=2,<4", "pyarrow>=17,<26"]
+arrow = ["pyarrow>=17,<26"]
+dev = ["pytest>=8,<10", "mypy>=1.14,<2", "ruff>=0.9,<1"]
+
+[tool.setuptools]
+packages = ["datalake", "datalake.storage"]
+package-dir = {datalake = "../../infra/datalake"}
+
+[tool.setuptools.package-data]
+datalake = ["py.typed"]
+
+[tool.pytest.ini_options]
+testpaths = ["../../infra/tests/datalake"]
+
+[tool.mypy]
+python_version = "3.12"
+strict = true
+mypy_path = "$MYPY_CONFIG_FILE_DIR/../../src"
+explicit_package_bases = true
+
+[[tool.mypy.overrides]]
+module = ["pyarrow", "pyarrow.*", "pandas", "pandas.*"]
+ignore_missing_imports = true
+
+[[tool.mypy.overrides]]
+module = ["comm_research", "comm_research.*", "infra"]
+follow_imports = "skip"
+
+[tool.ruff]
+target-version = "py312"
+line-length = 100
+
+[tool.ruff.lint]
+select = ["E4", "E7", "E9", "F", "I"]

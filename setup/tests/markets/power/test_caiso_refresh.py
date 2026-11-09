@@ -49,10 +49,13 @@ class RefreshTests(unittest.TestCase):
         self,
         day,
         node="TH_SP15_GEN-APND",
-        hours=24,
+        hours=None,
         components=("LMP", "MCE", "MCC", "MCL"),
     ):
-        lower = pipeline._query_bounds(DAM_LMP, day)[0].astimezone(timezone.utc)
+        lower, upper = (value.astimezone(timezone.utc)
+                        for value in pipeline._query_bounds(DAM_LMP, day))
+        if hours is None:
+            hours = int((upper - lower).total_seconds() // 3600)
         rows = []
         for hour in range(hours):
             start = lower + timedelta(hours=hour)

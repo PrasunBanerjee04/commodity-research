@@ -6,6 +6,8 @@ setup/
   config/, env/, assets/, docs/, tests/ # Market and integration tests
 infra/
   http/, lake/, tools/vis/, tools/preproc/
+  datalake/                    # Typed local API; installed as import datalake
+  examples/datalake/
   dags/, tests/, prod/
 src/comm_research/
   models/                      # Math, curves, regression, kernels
@@ -88,3 +90,12 @@ lake behavior, weather transforms, ingestion resumption, alias identity, CLI
 launchers, package exports, and notebook helpers. Optional dependency tests run
 when their corresponding extras are installed. Live data pulls require provider
 access and are separate from the fixture-based tests.
+
+## DataLake
+
+The `datalake` distribution is packaged in `setup/datalake/`, with source in
+`infra/datalake/`. See [functions and examples](datalake.md). It reads the existing
+`data/lake/` tree directly; `area="clean"` and `area="raw"` select sibling areas.
+Datasets are discovered from files, without registration or a metadata database.
+Research writes use ordinary single-file Parquet outputs; market scripts own
+partitioned ingestion data.

@@ -1,1 +1,4 @@
 -e ./setup[weather,era5,ecmwf,gefs,vis,notebooks]
+
+# Shared local research data API (Python 3.12+).
+-e ./setup/datalake
