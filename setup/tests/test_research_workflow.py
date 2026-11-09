@@ -13,7 +13,7 @@ ROOT = Path(__file__).resolve().parents[2]
 class ResearchWorkflowTests(unittest.TestCase):
     def test_all_task_scripts_launch_from_another_directory(self):
         for market, task in (("weather", "ecmwf"), ("weather", "gefs"),
-                             ("weather", "era5"), ("power", "oasis")):
+                             ("weather", "era5"), ("weather", "era5_actuals"), ("power", "oasis")):
             module = f"comm_research.markets.{market}.scripts.{task}"
             path = ROOT / "src" / Path(*module.split(".")).with_suffix(".py")
             for args in ((str(path), "--help"), ("-m", module, "--help")):

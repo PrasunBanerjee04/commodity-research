@@ -1,6 +1,5 @@
-"""Execute datasets.ipynb's matched-actuals helpers against hourly fixtures."""
+"""Matched-actuals helpers from the dataset explorer, tested on hourly fixtures."""
 from datetime import date, datetime, timedelta, timezone
-import json
 from pathlib import Path
 import tempfile
 import unittest
@@ -9,7 +8,7 @@ import polars as pl
 
 from comm_research.infra.lake.parquet import scan_parquet
 
-NOTEBOOK = Path(__file__).resolve().parents[4] / 'notebooks/datasets.ipynb'
+from comm_research.markets.weather.scripts import era5_actuals
 
 
 class MatchedActualsTests(unittest.TestCase):
@@ -25,11 +24,12 @@ class MatchedActualsTests(unittest.TestCase):
         for grid_id, (lat,lon) in self.coordinates.items():
             pl.DataFrame({'timestamp':[self.week], 'lat':[lat], 'lon':[lon], '2m_mean':[999.]}).write_csv(self.ids/f'socal_temp_2m_{grid_id}.csv')
         self.original = {p.name:p.read_bytes() for p in self.ids.glob('*.csv')}
-        self.ns = {'pl':pl,'Path':Path,'PROJECT_ROOT':self.root}
-        notebook = json.loads(NOTEBOOK.read_text())
-        helper = next(''.join(c['source']) for c in notebook['cells']
-                      if c['cell_type']=='code' and 'def matched_era5_weeks(' in ''.join(c['source']))
-        exec(compile(helper, str(NOTEBOOK), 'exec'), self.ns)
+        self.ns = {
+            'existing_grid_ids': era5_actuals.existing_grid_ids,
+            'matched_era5_weeks': era5_actuals.matched_era5_weeks,
+            'export_matched_actuals': lambda *args: era5_actuals.export_matched_actuals(
+                *args, clean_root=self.root / 'data/clean'),
+        }
         self.grid = self.ns['existing_grid_ids'](self.ids,'socal')
 
     def hourly(self, weeks=(0,)):
