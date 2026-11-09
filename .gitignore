@@ -1,3 +1,5 @@
+# Ignore the entire local data tree, including raw, clean, lake, and audit files.
+# Previously committed files must also be removed from Git history to unblock pushes.
 /data/
 /.env
 
