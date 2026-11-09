@@ -16,3 +16,4 @@ node_modules/
 !/setup/env/README.md
 /setup/build/
 /setup/dist/
+data/
