@@ -1,4 +1,11 @@
--e ./setup[weather,era5,ecmwf,gefs,vis,notebooks]
+-e ./setup
 
-# Shared local research data API (Python 3.12+).
--e ./setup/datalake
+# Local Airflow runtime, standard operators, and PostgreSQL metadata support.
+apache-airflow[postgres,standard]==3.4.0
+
+# TaskFlow decorators from airflow.sdk. Airflow pins the compatible SDK version.
+apache-airflow-task-sdk
+
+# Pipeline tasks upload raw files to R2 and load cleaned tables into DuckDB.
+boto3
+duckdb
