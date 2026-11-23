@@ -5,7 +5,11 @@ apache-airflow[postgres,standard]==3.4.0
 
 # TaskFlow decorators from airflow.sdk. Airflow pins the compatible SDK version.
 apache-airflow-task-sdk
+apache-airflow-providers-fab
 
 # Pipeline tasks upload raw files to R2 and load cleaned tables into DuckDB.
 boto3
 duckdb
+
+# ecwmf 
+ecmwf-opendata
