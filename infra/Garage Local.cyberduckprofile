@@ -1,0 +1,49 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Protocol</key>
+    <string>s3</string>
+    <key>Vendor</key>
+    <string>CommodityResearchGarageLocal</string>
+    <key>Description</key>
+    <string>Garage Local (HTTP)</string>
+    <key>Default Nickname</key>
+    <string>Commodity Research Data Lake</string>
+    <key>Scheme</key>
+    <string>http</string>
+    <key>Default Hostname</key>
+    <string>127.0.0.1</string>
+    <key>Hostname Configurable</key>
+    <false/>
+    <key>Default Port</key>
+    <string>3900</string>
+    <key>Port Configurable</key>
+    <false/>
+    <key>Default Path</key>
+    <string>/commodities-raw</string>
+    <key>Path Configurable</key>
+    <true/>
+    <key>Username Configurable</key>
+    <true/>
+    <key>Username Placeholder</key>
+    <string>Access Key ID (GK...)</string>
+    <key>Password Placeholder</key>
+    <string>Secret Key</string>
+    <key>Anonymous Configurable</key>
+    <false/>
+    <key>Authorization</key>
+    <string>AWS4HMACSHA256</string>
+    <key>Region</key>
+    <string>garage</string>
+    <key>Regions</key>
+    <array>
+        <string>garage</string>
+    </array>
+    <key>Properties</key>
+    <dict>
+        <key>s3.bucket.virtualhost.disable</key>
+        <true/>
+    </dict>
+</dict>
+</plist>

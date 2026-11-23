@@ -1,0 +1,6 @@
+FROM apache/airflow:3.4.0
+
+USER airflow
+
+RUN pip install --no-cache-dir "apache-airflow==${AIRFLOW_VERSION}" boto3 ecmwf-opendata cdsapi==0.7.7 \
+    && pip check

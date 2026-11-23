@@ -1,11 +1,12 @@
 """Canonical paths for the CommodityResearch repository."""
 
+import os
 from pathlib import Path
 
 SETUP_DIR = Path(__file__).resolve().parent
 ROOT_DIR = SETUP_DIR.parent
 
-DATA_DIR = ROOT_DIR / "data"
+DATA_DIR = Path(os.environ.get("DATA_DIR", ROOT_DIR / "data")).expanduser().resolve()
 INFRA_DIR = ROOT_DIR / "infra"
 DAGS_DIR = INFRA_DIR / "dags"
 GAS_DAGS_DIR = DAGS_DIR / "gas"

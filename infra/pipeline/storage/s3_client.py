@@ -1,13 +1,18 @@
-## client to interact with the garage data lake 
+"""Object storage operations for the Garage data lake."""
+
+import os
+from contextlib import closing
+from typing import BinaryIO
+
 import boto3
 from botocore.config import Config
-import os
+
 
 def init_client():
     return boto3.client(
         "s3",
-        endpoint_url="http://localhost:3900",
-        region_name="garage",
+        endpoint_url=os.environ.get("GARAGE_ENDPOINT", "http://localhost:3900"),
+        region_name=os.environ.get("GARAGE_REGION", "garage"),
         aws_access_key_id=os.environ["GARAGE_ACCESS_KEY"],
         aws_secret_access_key=os.environ["GARAGE_SECRET_KEY"],
         config=Config(
@@ -15,12 +20,51 @@ def init_client():
             s3={"addressing_style": "path"}
         )
     )
-def read_from_lake():
-    pass 
 
-def write_to_lake(s3, filename, bucket, key):
-    s3.upload_file(
-        Filename=filename,
-        Bucket=bucket,
-        Key=key
-    )
+
+def read_from_lake(
+    s3,
+    bucket: str,
+    key: str,
+    destination: str | os.PathLike[str] | BinaryIO | None = None,
+) -> bytes | None:
+    """Return the object as bytes, or download it to a path or binary stream."""
+    if destination is None:
+        with closing(s3.get_object(Bucket=bucket, Key=key)["Body"]) as body:
+            return body.read()
+
+    if isinstance(destination, (str, os.PathLike)):
+        s3.download_file(Bucket=bucket, Key=key, Filename=os.fspath(destination))
+    else:
+        s3.download_fileobj(Bucket=bucket, Key=key, Fileobj=destination)
+    return None
+
+
+def write_to_lake(
+    s3,
+    filename: str | os.PathLike[str] | bytes | BinaryIO,
+    bucket: str,
+    key: str,
+) -> None:
+    """Upload a local file, bytes, or a readable binary stream to an object key."""
+    if isinstance(filename, (str, os.PathLike)):
+        s3.upload_file(Filename=os.fspath(filename), Bucket=bucket, Key=key)
+    elif isinstance(filename, bytes):
+        s3.put_object(Body=filename, Bucket=bucket, Key=key)
+    else:
+        s3.upload_fileobj(Fileobj=filename, Bucket=bucket, Key=key)
+
+
+def delete_from_lake(s3, bucket: str, key: str) -> None:
+    """Delete the object at the given key."""
+    s3.delete_object(Bucket=bucket, Key=key)
+
+
+def update_lake(
+    s3,
+    filename: str | os.PathLike[str] | bytes | BinaryIO,
+    bucket: str,
+    key: str,
+) -> None:
+    """Replace the entire object at the key, creating it if absent."""
+    write_to_lake(s3, filename, bucket, key)

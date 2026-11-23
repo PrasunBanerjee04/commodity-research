@@ -2,6 +2,7 @@
 # Previously committed files must also be removed from Git history to unblock pushes.
 /data/
 /.env
+/infra/.env.garage
 
 __pycache__/
 *.py[cod]

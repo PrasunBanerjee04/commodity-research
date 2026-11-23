@@ -1,0 +1,40 @@
+name: commodity-airflow
+
+services:
+  airflow:
+    build:
+      context: .
+      dockerfile: Dockerfile.airflow
+    container_name: weather-airflow
+    command: standalone
+    ports:
+      - "127.0.0.1:8080:8080"
+    env_file:
+      - path: .env.garage
+        required: false
+      - path: ../.env
+        required: false
+    environment:
+      AIRFLOW__CORE__DAGS_FOLDER: /opt/project/infra/dags
+      AIRFLOW__CORE__LOAD_EXAMPLES: "False"
+      AIRFLOW__CORE__DAGS_ARE_PAUSED_AT_CREATION: "False"
+      PYTHONPATH: /opt/project:/opt/project/infra
+      DATA_DIR: /opt/project/data
+      GARAGE_ENDPOINT: http://garage:3900
+    volumes:
+      - ./dags:/opt/project/infra/dags:ro
+      - ./pipeline:/opt/project/infra/pipeline:ro
+      - ../setup:/opt/project/setup:ro
+      - ../data:/opt/project/data
+      - airflow_state:/opt/airflow
+    networks:
+      - garage
+    restart: unless-stopped
+
+volumes:
+  airflow_state:
+
+networks:
+  garage:
+    external: true
+    name: garage_default

@@ -13,3 +13,4 @@ duckdb
 
 # ecwmf 
 ecmwf-opendata
+cdsapi==0.7.7
