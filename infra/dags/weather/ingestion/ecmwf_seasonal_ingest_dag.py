@@ -5,7 +5,7 @@ from pathlib import Path
 from airflow.sdk import Param, dag, get_current_context, task
 
 from pipeline.ingestion.ecmwf_ingest import retrieve_monthly_forecast
-from pipeline.storage.s3_client import init_client, write_to_lake
+from pipeline.storage.s3_client import S3Client
 from setup.paths import DATA_DIR
 
 SYSTEM = "51"
@@ -69,9 +69,9 @@ def ecmwf_seasonal_ingest():
 
     @task
     def store_data(paths: dict[str, str]):
-        s3 = init_client()
+        s3 = S3Client()
         for filepath, key in paths.items():
-            write_to_lake(s3, filepath, BUCKET, key)
+            s3.write_to_lake(filepath, BUCKET, key)
         for filepath in paths:
             Path(filepath).unlink(missing_ok=True)
 
