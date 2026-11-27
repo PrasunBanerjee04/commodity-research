@@ -3,4 +3,5 @@
 ZONAL_MAP = {
     # NOAA nClimGrid-Daily CONUS bounds, in degrees with west negative.
     "us48": (24.0, 50.0, -125.0, -66.0),
+    "europe": (34.0, 72.0, -25.0, 60.0),
 }

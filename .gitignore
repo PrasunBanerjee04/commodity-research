@@ -18,3 +18,7 @@ node_modules/
 /setup/build/
 /setup/dist/
 data/
+
+# Standalone browser exports.
+*.[hH][tT][mM][lL]
+*.[hH][tT][mM]

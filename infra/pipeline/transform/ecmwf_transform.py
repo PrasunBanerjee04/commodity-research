@@ -1,14 +1,28 @@
-
-import pandas as pd
-import eccodes
-
 from tempfile import TemporaryFile
-from comm_research.markets.weather.map import ZONAL_MAP
+from typing import Literal
+
+import eccodes
+import pandas as pd
+import polars as pl
+
+from comm_research.markets.weather import ZONAL_MAP
 from .schema import SCHEMAS
 
-def transform(raw_data: bytes) -> pd.DataFrame:
-    """Return one row per grid point in each GRIB message."""
+Frame = pl.DataFrame | pd.DataFrame
+FrameType = Literal["polars", "pandas"]
 
+
+def transform(
+    raw_data: bytes,
+    *,
+    region: str | None = None,
+    max_messages: int | None = None,
+    type: FrameType = "polars",
+) -> Frame:
+    """Decode GRIB rows with optional limits on region and message count."""
+    if type not in ("polars", "pandas"):
+        raise ValueError(f"Unknown DataFrame type: {type!r}")
+    columns = ["latitude", "longitude", "value"]
     keys = [
         "shortName", "units", "typeOfLevel", "level", "dataDate", "dataTime",
         "stepRange", "validityDate", "validityTime", "perturbationNumber",
@@ -25,30 +39,54 @@ def transform(raw_data: bytes) -> pd.DataFrame:
                         bitmap = eccodes.codes_get_array(message, "bitmap")
                         points[bitmap == 0, 2] = float("nan")
 
-                    frame = pd.DataFrame(points, columns=["latitude", "longitude", "value"])
-                    frame["message"] = len(frames)
+                    metadata = {"message": len(frames)}
                     for key in keys:
                         if eccodes.codes_is_defined(message, key) and not eccodes.codes_is_missing(message, key):
-                            frame[key] = eccodes.codes_get(message, key)
+                            metadata[key] = eccodes.codes_get(message, key)
+                    if type == "pandas":
+                        frame = pd.DataFrame(points, columns=columns).assign(**metadata)
+                    else:
+                        frame = pl.DataFrame(points, schema=columns, orient="row").with_columns(
+                            pl.col("value").fill_nan(None),
+                            **{key: pl.lit(value) for key, value in metadata.items()},
+                        )
+                    if region is not None:
+                        frame = geofilter(frame, region, type=type)
                     frames.append(frame)
                 finally:
                     eccodes.codes_release(message)
+                if len(frames) == max_messages:
+                    break
     except eccodes.CodesInternalError as error:
         raise ValueError(f"Could not decode raw_data as GRIB: {error}") from error
 
     if not frames:
         raise ValueError("No GRIB messages found in raw_data")
 
-    return pd.concat(frames, ignore_index=True)
+    if type == "pandas":
+        return pd.concat(frames, ignore_index=True)
+    return pl.concat(frames, how="diagonal_relaxed")
 
-def geofilter(df, region):
-    df = df.copy()
-    min_lat, max_lat, min_lon, max_lon = ZONAL_MAP[region] 
+
+def _as_type(df: Frame, type: FrameType) -> Frame:
+    if type == "polars":
+        return df if isinstance(df, pl.DataFrame) else pl.from_pandas(df)
+    if type == "pandas":
+        return df if isinstance(df, pd.DataFrame) else df.to_pandas()
+    raise ValueError(f"Unknown DataFrame type: {type!r}")
+
+
+def geofilter(df: Frame, region: str, *, type: FrameType = "polars") -> Frame:
+    min_lat, max_lat, min_lon, max_lon = ZONAL_MAP[region]
     lon = (df["longitude"] + 180) % 360 - 180
-    return df[
-        df["latitude"].between(min_lat, max_lat) & 
-        lon.between(min_lon, max_lon)
-    ]
+    if isinstance(df, pl.DataFrame):
+        filtered = df.filter(
+            df["latitude"].is_between(min_lat, max_lat) & lon.is_between(min_lon, max_lon)
+        )
+    else:
+        filtered = df[df["latitude"].between(min_lat, max_lat) & lon.between(min_lon, max_lon)]
+    return _as_type(filtered, type)
+
 
 def get_schema(path): 
     parts = path.split("/")
@@ -61,12 +99,12 @@ def get_schema(path):
     path_prefix = '/'.join(path_prefix_list)
 
     return SCHEMAS.get(path_prefix)['filter_columns'], SCHEMAS.get(path_prefix)['rename_columns']
-    
-def schema_filter(df, path):
-    df = df.copy()
-    schema, rename = get_schema(path)
-    df = df[schema]
-    if rename: 
-        df = df.rename(columns=rename)
 
-    return df
+
+def schema_filter(df: Frame, path: str, *, type: FrameType = "polars") -> Frame:
+    schema, rename = get_schema(path)
+    if isinstance(df, pl.DataFrame):
+        filtered = df.select(schema).rename(rename or {}, strict=False)
+    else:
+        filtered = df[schema].rename(columns=rename or {})
+    return _as_type(filtered, type)

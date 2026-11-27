@@ -14,3 +14,4 @@ include-package-data = false
 
 [tool.setuptools.package-data]
 "*" = [".gitkeep"]
+"comm_research.markets.weather.vis" = ["conus_2024.json.gz", "europe_50m.json.gz", "natural_earth.json.gz"]

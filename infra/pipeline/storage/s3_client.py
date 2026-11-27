@@ -1,11 +1,27 @@
 """Object storage operations for the Garage data lake."""
 
 import os
+from collections.abc import Iterator
 from contextlib import closing
 from typing import BinaryIO
 
 import boto3
 from botocore.config import Config
+
+from ..transform.schema import DATA_PREFIXES
+
+
+def s3_mapper(data: str) -> str:
+    """Return the raw S3 prefix for a dataset name."""
+    try:
+        return DATA_PREFIXES[data]
+    except KeyError:
+        raise ValueError(f"Unknown dataset {data!r}. Available: {', '.join(DATA_PREFIXES)}") from None
+
+
+def list_available_data() -> None:
+    """Print the dataset names accepted by s3_mapper."""
+    print(*DATA_PREFIXES, sep="\n")
 
 
 class S3Client:
@@ -23,6 +39,13 @@ class S3Client:
                 s3={"addressing_style": "path"},
             ),
         )
+
+    def list_keys(self, bucket: str, prefix: str) -> Iterator[str]:
+        """Yield all object keys under a prefix across listing pages."""
+        paginator = self._client.get_paginator("list_objects_v2")
+        for page in paginator.paginate(Bucket=bucket, Prefix=prefix):
+            for entry in page.get("Contents", ()):
+                yield entry["Key"]
 
     def read_from_lake(
         self,
