@@ -9,18 +9,73 @@ def _column(columns, *names):
     return next((name for name in names if name in columns), None)
 
 
-def _latest_grib_rows(df, columns):
+LATEST_COLUMN = "_latest_forecast"
+
+
+def _grib_rows(df, columns, lat_col, lon_col, windows):
     if isinstance(df, pd.DataFrame):
         df = pl.from_pandas(df.loc[:, columns])
     rows = df.lazy().select(columns)
-    for name in ("dataDate", "dataTime"):
-        if name in columns:
-            cycle = pl.col(name).cast(pl.Int64).fill_null(0)
-            rows = rows.filter(cycle == cycle.max())
-    if "perturbationNumber" in columns:
-        member = pl.col("perturbationNumber").cast(pl.Int64)
-        rows = rows.filter(member.eq_missing(member.min()))
-    return rows.collect().to_pandas()
+    area = "region"
+    source_areas = ["us48", "europe"]
+    if (
+        area not in columns
+        or df[area].null_count()
+        or (windows and not df[area].is_in(source_areas).all())
+    ):
+        grid_area = pl.lit("forecast")
+        if windows:
+            lon = pl.col(lon_col)
+            signed_lon = pl.when(lon >= 180).then(lon - 360).otherwise(lon)
+            for name, (south, north, west, east) in reversed(tuple(windows.items())):
+                inside = pl.col(lat_col).is_between(
+                    south, north
+                ) & signed_lon.is_between(west, east)
+                tile = "europe" if name == "euro" else name
+                grid_area = pl.when(inside).then(pl.lit(tile)).otherwise(grid_area)
+        if area in columns:
+            source = pl.col(area).cast(pl.String)
+            grid_area = (
+                pl.when(source.is_in(source_areas)).then(source).otherwise(grid_area)
+                if windows
+                else pl.coalesce(source, grid_area)
+            )
+        rows = rows.with_columns(grid_area.alias(area))
+    if windows:
+        # Both Europe views use the same ECMWF source tile.
+        areas = {"europe" if name == "euro" else name for name in windows}
+        rows = rows.filter(pl.col(area).is_in([*areas, "forecast"]))
+
+    for name in ("dataTime", "validityTime"):
+        if name in columns and df[name].null_count():
+            rows = rows.with_columns(pl.col(name).fill_null(0))
+
+    cycle = [name for name in ("dataDate", "dataTime") if name in columns]
+    valid = [name for name in ("validityDate", "validityTime") if name in columns]
+    member = ["perturbationNumber"] if "perturbationNumber" in columns else []
+    keys = [area, *cycle, *valid, *member]
+    # Rank forecast messages before joining back to the much larger grid table.
+    catalog = rows.select(keys).unique().collect()
+    if member:
+        number = pl.col(member[0]).cast(pl.Int64)
+        catalog = catalog.filter(
+            number.eq_missing(number.min().over([area, *cycle, *valid]))
+        )
+    if cycle:
+        order = [pl.col(name).cast(pl.Int64).fill_null(0) for name in cycle]
+        catalog = catalog.sort(order, descending=True).with_columns(
+            pl.struct(cycle)
+            .eq_missing(pl.struct(cycle).first().over(area))
+            .alias(LATEST_COLUMN)
+        )
+    else:
+        catalog = catalog.with_columns(pl.lit(True).alias(LATEST_COLUMN))
+    chosen = catalog.unique(subset=[area, *valid], keep="first")
+    return (
+        rows.join(chosen.lazy(), on=keys, how="inner", nulls_equal=True)
+        .collect()
+        .to_pandas()
+    )
 
 
 def _grib_valid_time(data):
@@ -99,6 +154,7 @@ def plot_data(df, metric, windows):
         )
 
     metadata = [
+        "region",
         "validityDate",
         "validityTime",
         "dataDate",
@@ -113,13 +169,13 @@ def plot_data(df, metric, windows):
     ):
         raise ValueError("Each selected column name must appear once.")
     if grib:
-        data = _latest_grib_rows(df, columns)
+        data = _grib_rows(df, columns, lat_col, lon_col, windows)
     elif isinstance(df, pl.DataFrame):
         data = df.select(columns).to_pandas()
     else:
         data = df.loc[:, columns]
 
-    data = _crop(data, lat_col, lon_col, windows)
+    data = _crop(data, lat_col, lon_col, windows.values())
     units = _units(data, metric)
     if grib:
         time_col = "valid_time"

@@ -1,9 +1,11 @@
 import logging
 import re
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from zoneinfo import ZoneInfo
 
-from airflow.sdk import Param, dag, get_current_context, task
+from airflow.providers.standard.sensors.date_time import DateTimeSensor
+from airflow.sdk import CronTriggerTimetable, Param, dag, get_current_context, task
 from botocore.exceptions import ClientError
 
 from pipeline.ingestion.ecmwf_ingest import retrieve_monthly_forecast
@@ -13,7 +15,8 @@ from setup.paths import DATA_DIR
 SYSTEM = "51"
 PRODUCT_TYPE = "monthly_mean"
 PARAMS = {"2t": "2m_temperature"}
-FCMONTHS = (1, 2, 3, 4, 5)
+FCMONTHS = (1, 2, 3, 4, 5, 6)
+EASTERN = ZoneInfo("America/New_York")
 START_DATE = datetime(2026, 1, 1, tzinfo=timezone.utc)
 BUCKET = "commodities-raw"
 LOGGER = logging.getLogger(__name__)
@@ -32,28 +35,37 @@ def has_grib_markers(path: Path) -> bool:
 
 @dag(
     dag_id="ecmwf_seasonal_ingest",
-    schedule=None,
+    schedule=CronTriggerTimetable("0 0 1 * *", timezone=EASTERN.key),
     start_date=START_DATE,
     catchup=False,
     max_active_runs=1,
     params={
         "forecast_date": Param(
-            type="string",
+            None,
+            type=["null", "string"],
             pattern=r"^[0-9]{6}01$",
             title="Forecast date (YYYYMM01)",
+            description="Leave blank to use the run's month in Eastern time.",
         ),
     },
     tags=["ecmwf", "seasonal", "ingestion"],
 )
 def ecmwf_seasonal_ingest():
 
-    @task
-    def ingest_data() -> dict[str, str]:
-        context = get_current_context()
-        conf = context["dag_run"].conf or {}
-        run_date = conf.get("forecast_date")
+    @task(multiple_outputs=True)
+    def resolve_forecast() -> dict[str, str]:
+        dag_run = get_current_context()["dag_run"]
+        run_date = (dag_run.conf or {}).get("forecast_date")
+        if run_date is None and dag_run.logical_date is not None:
+            run_date = dag_run.logical_date.astimezone(EASTERN).strftime("%Y%m01")
         if not isinstance(run_date, str) or not re.fullmatch(r"[0-9]{6}01", run_date):
             raise ValueError("Provide forecast_date in YYYYMM01 format")
+        forecast_date = datetime.strptime(run_date, "%Y%m%d")
+        release_time = forecast_date.replace(day=6, hour=12, tzinfo=timezone.utc)
+        return {"forecast_date": run_date, "release_time": release_time.isoformat()}
+
+    @task
+    def ingest_data(run_date: str) -> dict[str, str]:
         forecast_date = datetime.strptime(run_date, "%Y%m%d").date()
 
         s3 = S3Client()
@@ -114,7 +126,17 @@ def ecmwf_seasonal_ingest():
         for filepath in paths:
             Path(filepath).unlink(missing_ok=True)
 
-    store_data(ingest_data())
+    forecast = resolve_forecast()
+    wait_for_release = DateTimeSensor(
+        task_id="wait_for_release",
+        target_time=forecast["release_time"],
+        mode="reschedule",
+        poke_interval=1800,
+        timeout=timedelta(days=7),
+    )
+    paths = ingest_data(forecast["forecast_date"])
+    wait_for_release >> paths
+    store_data(paths)
 
 
 ecmwf_seasonal_ingest()

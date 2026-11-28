@@ -161,6 +161,16 @@ def _polygons(geometry):
 
 
 @lru_cache(maxsize=4)
+def region_polygons(name):
+    return _polygon_data(
+        [
+            [ring.coords for ring in (polygon.exterior, *polygon.interiors)]
+            for polygon in _polygons(region_geometry((name,)))
+        ]
+    )
+
+
+@lru_cache(maxsize=4)
 def display_mask(
     footprints: tuple, extent: tuple, native_shape: tuple, shape: tuple
 ) -> DisplayMask:

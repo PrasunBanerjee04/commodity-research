@@ -131,6 +131,71 @@ class SpatialMapTests(unittest.TestCase):
         legend = layout.select_one({"type": ColorBar})
         self.assertEqual(legend.title, "Temperature (K)")
 
+    def test_latest_cycles_and_history_follow_each_regions_coverage(self):
+        data = pl.DataFrame(
+            [
+                (region, run, 1200, 20261100 + day, 1200, lat, lon, value, "K", 1)
+                for region, run, day, value in (
+                    ("us48", 20261125, 26, 271),
+                    ("us48", 20261125, 27, 272),
+                    ("us48", 20261125, 28, 273),
+                    ("us48", 20261127, 28, 281),
+                    ("us48", 20261127, 29, 282),
+                    ("us48", 20261127, 30, 283),
+                    ("europe", 20261125, 26, 291),
+                    ("europe", 20261125, 29, 292),
+                    ("europe", 20261126, 27, 295),
+                    ("europe", 20261126, 28, 296),
+                )
+                for lat in ([41, 42] if region == "us48" else [48, 49])
+                for lon in ([-100, -99] if region == "us48" else [4, 5])
+            ],
+            schema=[
+                "region",
+                "dataDate",
+                "dataTime",
+                "validityDate",
+                "validityTime",
+                "latitude",
+                "longitude",
+                "value",
+                "units",
+                "perturbationNumber",
+            ],
+            orient="row",
+        )
+        with patch.object(SpatialMap, "save", autospec=True) as save:
+            weather.plot(data, "value", ["us48", "europe"])
+            layout = save.call_args.args[1]
+
+        slider = layout.select_one({"name": "weather-time"})
+        button = layout.select_one({"name": "weather-history"})
+        callback = slider.js_property_callbacks["change:value"][0]
+        self.assertIs(button.js_property_callbacks["change:active"][0], callback)
+        self.assertEqual(slider.end, 3)
+        self.assertEqual(slider.value, 1)
+        latest, history = callback.args["timeline"]
+        self.assertEqual(history, [0, 1, 2, 3, 4])
+        self.assertEqual(latest, [5, 2, 6, 4])
+        frames = callback.args["frames"].data["image"]
+        readings = [sorted(np.unique(frame[np.isfinite(frame)])) for frame in frames]
+        self.assertEqual(
+            [readings[i] for i in latest], [[295], [281, 296], [282], [283]]
+        )
+        self.assertEqual(
+            [readings[i] for i in history],
+            [[271, 291], [272, 295], [281, 296], [282, 292], [283]],
+        )
+        missing = callback.args["missing"]
+        self.assertEqual(
+            [missing["conus"][i] for i in latest], [True, False, False, False]
+        )
+        self.assertEqual(
+            [missing["europe"][i] for i in latest], [False, False, True, True]
+        )
+        self.assertFalse(layout.select_one({"name": "weather-missing-conus"}).visible)
+        self.assertFalse(layout.select_one({"name": "weather-missing-europe"}).visible)
+
     def test_plot_infers_pandas_columns_and_fits_an_empty_region_selection(self):
         data = grid().rename(
             columns={

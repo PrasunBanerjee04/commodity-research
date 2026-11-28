@@ -53,6 +53,7 @@ from ._spatial_regions import (
     natural_earth,
     project_path,
     region_geometry,
+    region_polygons,
 )
 
 _MIB = 1024**2
@@ -66,6 +67,7 @@ _PALETTES = {
 }
 _WATER = "#eaf0f4"
 _LAND = "#f7f7f3"
+_NO_DATA = "#c6ccd0"
 _REGION_ALIASES = {"us48": "conus", "western_europe": "euro"}
 _TEMPERATURE_LABELS = ("°F", "°C", "K")
 _TEMPERATURE_CODES = {
@@ -118,7 +120,7 @@ for (let y = 0, k = 0; y < rowOffsets.length; y++) {
             ((pixel & 0x00ffffff) | (Math.round((pixel >>> 24) * a / 255) << 24))
     }
 }
-active.setv({data: {image: [output]}}, {check_eq: false})
+active.setv({data: {image: [output], frame: [i]}}, {check_eq: false})
 """
 
 
@@ -261,7 +263,7 @@ def _add_hover(plot, renderer, variable, units, args):
             if (mask !== null) {
                 const {i, j, flat_index} = special_vars.image_index
                 if (!mask.data.alpha[0][flat_index]) return "No data"
-                const frame = frames.data.image[slider === null ? 0 : slider.value]
+                const frame = frames.data.image[active.data.frame[0]]
                 reading = frame[mask.data.rows[0][j] + mask.data.cols[0][i]]
             }
             if (!Number.isFinite(reading)) return "No data"
@@ -356,10 +358,22 @@ def _time_ticks(labels):
     for i in indices:
         offset = 0 if i == 0 else -100 if i == end else -50
         parts.append(
-            f'<span style="position:absolute;left:{100 * i / end:g}%;transform:translateX({offset}%);'
+            f'<span style="position:absolute;left:{100 * i / max(end, 1):g}%;transform:translateX({offset}%);'
             f'white-space:nowrap">{escape(labels[i])}</span>'
         )
     return "".join(parts)
+
+
+@dataclass(frozen=True)
+class _Raster:
+    frames: np.ndarray
+    timestamps: tuple
+    history_count: int
+    latest: list[int]
+    missing: dict[str, list[bool]]
+    bounds: _Bounds
+    low: float
+    high: float
 
 
 class SpatialMap:
@@ -380,8 +394,12 @@ class SpatialMap:
         *,
         scale_region,
         allow_grid_gaps,
+        latest_col,
+        coverage_regions,
     ):
         required = {metric, time_col, lat_col, lon_col}
+        if latest_col is not None:
+            required.add(latest_col)
         missing = required.difference(df.columns)
         if missing:
             raise ValueError(f"Missing columns: {', '.join(sorted(missing))}.")
@@ -394,6 +412,16 @@ class SpatialMap:
         if times.isna().any():
             raise ValueError(f"{time_col!r} contains missing or invalid timestamps.")
         ti, timestamps = pd.factorize(times, sort=True)
+        latest_frames = list(range(len(timestamps)))
+        overrides = np.empty(0, dtype=np.intp)
+        if latest_col is not None:
+            older = ~df[latest_col].to_numpy(dtype=bool)
+            latest_times = np.unique(ti[~older])
+            overrides = np.intersect1d(latest_times, ti[older])
+            replacement = {j: len(timestamps) + i for i, j in enumerate(overrides)}
+            latest_frames = [int(replacement.get(j, j)) for j in latest_times]
+            if not latest_frames:
+                raise ValueError("The latest forecast selection is empty.")
         lat = _numeric_column(df, lat_col)
         lon = _numeric_column(df, lon_col)
         if not np.isfinite(lat).all() or np.any(np.abs(lat) > MAX_LATITUDE):
@@ -439,7 +467,7 @@ class SpatialMap:
         )
         raster_height = int(np.ceil((bounds.north - bounds.south) / shortest_cell))
         raw_shape = (len(timestamps), nlat, nlon)
-        projected_shape = (len(timestamps), raster_height, nlon)
+        projected_shape = (len(timestamps) + len(overrides), raster_height, nlon)
         raster_bytes = 4 * (prod(raw_shape) + prod(projected_shape))
         raster_bytes += 4 * raster_height * nlon  # temporary resampled frame
         if raster_bytes > self.max_frame_mb * _MIB:
@@ -463,15 +491,14 @@ class SpatialMap:
             latitudes = latitudes[0] + dy * np.arange(nlat)
         if nlon != len(longitudes):
             xi = x_indices[xi]
-            if scale_region:
+            if scale_region or coverage_regions:
                 longitudes = longitudes[0] + dx * np.arange(nlon)
         cube[ti, yi, xi] = values
+        if scale_region or coverage_regions:
+            xs = tuple(EARTH_RADIUS * np.deg2rad(longitudes))
+            ys = tuple(mercator_y(latitudes))
         if scale_region:
-            inside = native_mask(
-                scale_region,
-                tuple(EARTH_RADIUS * np.deg2rad(longitudes)),
-                tuple(mercator_y(latitudes)),
-            )
+            inside = native_mask(scale_region, xs, ys)
             low = float(
                 np.fmin.reduce(cube, axis=None, where=inside[None], initial=np.inf)
             )
@@ -502,7 +529,39 @@ class SpatialMap:
         projected = np.empty(projected_shape, dtype="float32")
         for source_frame, projected_frame in zip(cube, projected):
             projected_frame[:] = source_frame[source_rows]
-        return projected, timestamps, bounds, low, high
+
+        region_masks = {name: native_mask((name,), xs, ys) for name in coverage_regions}
+        missing = {
+            name: (
+                ~np.isfinite(
+                    np.fmax.reduce(cube, axis=(1, 2), where=mask[None], initial=-np.inf)
+                )
+            ).tolist()
+            for name, mask in region_masks.items()
+        }
+        if len(overrides):
+            cube[ti[older], yi[older], xi[older]] = np.nan
+            for i, j in enumerate(overrides, start=len(timestamps)):
+                projected[i] = cube[j, source_rows]
+                for name, mask in region_masks.items():
+                    missing[name].append(
+                        not np.isfinite(
+                            np.fmax.reduce(
+                                cube[j], axis=None, where=mask, initial=-np.inf
+                            )
+                        )
+                    )
+        frame_times = (*timestamps, *timestamps[overrides])
+        return _Raster(
+            projected,
+            frame_times,
+            len(timestamps),
+            latest_frames,
+            missing,
+            bounds,
+            low,
+            high,
+        )
 
     def _display_mask(
         self, footprints, frames, bounds, x_range, y_range, width, height
@@ -549,6 +608,7 @@ class SpatialMap:
         width: int = 1200,
         height: int = 590,
         allow_grid_gaps: bool = False,
+        latest_col: str | None = None,
     ) -> LayoutDOM:
         """Plot a regular grid with naive timestamps interpreted as UTC.
 
@@ -562,6 +622,7 @@ class SpatialMap:
         to mask water in that view. Width and height set the preferred map size.
         Set ``allow_grid_gaps=True`` to allow missing rows or
         columns in data from separate tiles when the viewport fits the grid.
+        ``latest_col`` may identify current forecast rows in a combined timeline.
         """
         regions = _selected_regions(region)
         if clip_to_region is not None and not isinstance(clip_to_region, bool):
@@ -586,7 +647,7 @@ class SpatialMap:
 
         footprints = regions or ("land",)
         scale_region = footprints if clipping and (vmin is None or vmax is None) else ()
-        frames, timestamps, bounds, data_low, data_high = self._prepare(
+        raster = self._prepare(
             df,
             metric,
             time_col,
@@ -594,9 +655,12 @@ class SpatialMap:
             lon_col,
             scale_region=scale_region,
             allow_grid_gaps=allow_grid_gaps or len(regions) > 1,
+            latest_col=latest_col,
+            coverage_regions=regions if clipping and len(regions) > 1 else (),
         )
+        frames, bounds = raster.frames, raster.bounds
         low, high = _color_bounds(
-            data_low, data_high, vmin, vmax, symmetric=palette_name == "anomaly"
+            raster.low, raster.high, vmin, vmax, symmetric=palette_name == "anomaly"
         )
         geography = load_region("conus") if "conus" in regions else None
         view = _Bounds(*region_geometry(regions).bounds) if regions else bounds
@@ -680,7 +744,30 @@ class SpatialMap:
             "global_alpha": opacity,
         }
         active = ColumnDataSource(name="weather-frame")
-        callback_args = {"active": active}
+        initial_step = next(
+            (
+                step
+                for step, frame in enumerate(raster.latest)
+                if all(not missing[frame] for missing in raster.missing.values())
+            ),
+            0,
+        )
+        first = raster.latest[initial_step]
+        missing_layers = {}
+        for name, missing in raster.missing.items():
+            if any(missing):
+                missing_layers[name] = plot.multi_polygons(
+                    source=ColumnDataSource(region_polygons(name)),
+                    name=f"weather-missing-{name}",
+                    fill_color=_NO_DATA,
+                    line_alpha=0,
+                    visible=missing[first],
+                )
+        callback_args = {
+            "active": active,
+            "missing_layers": missing_layers,
+            "missing": raster.missing,
+        }
         mask_source = None
         frame_store = ColumnDataSource(
             data={"image": list(frames)}, name="weather-frames"
@@ -689,7 +776,10 @@ class SpatialMap:
             mask = self._display_mask(
                 footprints, frames, bounds, x_range, y_range, width, height
             )
-            active.data = {"image": [_initial_rgba(frames[0], mapper, mask)]}
+            active.data = {
+                "image": [_initial_rgba(frames[first], mapper, mask)],
+                "frame": [first],
+            }
             renderer = plot.image_rgba(source=active, **image_spec)
             mask_source = ColumnDataSource(
                 name="weather-region-mask",
@@ -702,9 +792,9 @@ class SpatialMap:
             callback_args.update(mapper=mapper, mask=mask_source)
             update_frame = _CLIPPED_FRAME_JS
         else:
-            active.data = {"image": [frames[0]]}
+            active.data = {"image": [frames[first]], "frame": [first]}
             renderer = plot.image(source=active, color_mapper=mapper, **image_spec)
-            update_frame = "active.data = {image: [frames.data.image[i]]}"
+            update_frame = "active.data = {image: [frames.data.image[i]], frame: [i]}"
         plot.multi_line(
             source=base["states"], line_color=_SLATE, line_width=0.6, line_alpha=0.52
         )
@@ -817,10 +907,10 @@ class SpatialMap:
         )
         if subtitle:
             header += f'<p style="margin:4px 0 0;font:400 13px/1.4 {_FONT};color:{_MUTED}">{escape(subtitle)}</p>'
-        labels, ticks = zip(*(_valid_time(stamp) for stamp in timestamps))
+        labels, ticks = zip(*(_valid_time(stamp) for stamp in raster.timestamps))
         time = Div(
             name="weather-valid-time",
-            text=f"Valid {labels[0]}",
+            text=f"Valid {labels[first]}",
             width=220,
             align="end",
             disable_math=True,
@@ -839,15 +929,29 @@ class SpatialMap:
             margin=(0, 0, 12, 0),
         )
         children = [heading, plot]
-        slider = None
+        history_indices = list(range(raster.history_count))
         if len(labels) > 1:
+            timeline = [raster.latest, history_indices]
+            tick_html = [_time_ticks([ticks[i] for i in frames]) for frames in timeline]
+            history = None
+            if raster.latest != history_indices:
+                history = RadioButtonGroup(
+                    name="weather-history",
+                    labels=["Latest", "Include history"],
+                    active=0,
+                    width=200,
+                    height=28,
+                    margin=(8, 37, 0, 7),
+                    html_attributes={"aria-label": "Forecast time range"},
+                )
             slider = Slider(
                 name="weather-time",
                 title="",
                 start=0,
-                end=len(labels) - 1,
+                end=max(1, len(raster.latest) - 1),
                 step=1,
-                value=0,
+                value=initial_step,
+                disabled=len(raster.latest) == 1,
                 show_value=False,
                 tooltips=False,
                 sizing_mode="stretch_width",
@@ -856,37 +960,58 @@ class SpatialMap:
                 stylesheets=[InlineStyleSheet(css=_SLIDER_CSS)],
                 html_attributes={"role": "group", "aria-label": "Forecast valid time"},
             )
-            slider.js_on_change(
-                "value",
-                CustomJS(
-                    args={
-                        **callback_args,
-                        "frames": frame_store,
-                        "labels": labels,
-                        "time": time,
-                    },
-                    code="const i = cb_obj.value\n"
-                    + update_frame
-                    + '\ntime.text = "Valid " + labels[i]',
-                ),
+            tick_view = Div(
+                name="weather-time-ticks",
+                text=tick_html[0],
+                sizing_mode="stretch_width",
+                height=16,
+                styles={
+                    "position": "relative",
+                    "font": f"400 11px/1.4 {_FONT}",
+                    "color": _MUTED,
+                    "font-variant-numeric": "tabular-nums",
+                },
+                margin=(0, 37, 0, 7),
             )
-            children.extend(
-                [
-                    slider,
-                    Div(
-                        text=_time_ticks(ticks),
-                        sizing_mode="stretch_width",
-                        height=16,
-                        styles={
-                            "position": "relative",
-                            "font": f"400 11px/1.4 {_FONT}",
-                            "color": _MUTED,
-                            "font-variant-numeric": "tabular-nums",
-                        },
-                        margin=(0, 37, 0, 7),
-                    ),
-                ]
+            change_frame = CustomJS(
+                args={
+                    **callback_args,
+                    "frames": frame_store,
+                    "labels": labels,
+                    "time": time,
+                    "history": history,
+                    "slider": slider,
+                    "timeline": timeline,
+                    "tick_view": tick_view,
+                    "tick_html": tick_html,
+                    "initial_step": initial_step,
+                },
+                code="""
+                    const mode = history?.active ?? 0
+                    const entries = timeline[mode]
+                    if (cb_obj === history) {
+                        const previous = labels[active.data.frame[0]]
+                        const match = entries.findIndex(j => labels[j] === previous)
+                        const value = match < 0 ? initial_step : match
+                        slider.setv({end: Math.max(1, entries.length - 1), disabled: entries.length === 1, value})
+                        tick_view.text = tick_html[mode]
+                    }
+                    const i = entries[Math.min(slider.value, entries.length - 1)]
+                    if (i === active.data.frame[0]) return
+                """
+                + update_frame
+                + """
+                    time.text = "Valid " + labels[i]
+                    for (const [name, layer] of Object.entries(missing_layers)) {
+                        layer.visible = missing[name][i]
+                    }
+                """,
             )
+            slider.js_on_change("value", change_frame)
+            children.extend([slider, tick_view])
+            if history is not None:
+                history.js_on_change("active", change_frame)
+                children.append(history)
         _add_hover(
             plot,
             renderer,
@@ -894,7 +1019,7 @@ class SpatialMap:
             units,
             {
                 **unit_args,
-                "slider": slider,
+                "active": active,
                 "mask": mask_source,
                 "frames": frame_store if clipping else None,
             },

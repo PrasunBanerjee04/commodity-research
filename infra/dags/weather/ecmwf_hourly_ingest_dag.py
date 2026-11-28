@@ -1,8 +1,9 @@
 import re
 from datetime import datetime, timezone
 from pathlib import Path
+from zoneinfo import ZoneInfo
 
-from airflow.sdk import Param, dag, get_current_context, task
+from airflow.sdk import CronTriggerTimetable, Param, dag, get_current_context, task
 
 from pipeline.ingestion.ecmwf_ingest import form_request, ingest_ecmwf
 from pipeline.storage.s3_client import S3Client
@@ -15,21 +16,24 @@ FORECAST_TYPES = ("pf", "cf")
 PARAMS: tuple[str, ...] = ("2t",)
 ECMWF_CYCLES = (0, 12)
 FCAST_HORIZONS_HOURLY = (24, 48, 72)
+EASTERN = ZoneInfo("America/New_York")
 START_DATE = datetime(2026, 1, 1, tzinfo=timezone.utc)
 BUCKET = "commodities-raw"
 
 
 @dag(
     dag_id="ecmwf_hourly_ingest",
-    schedule=None,
+    schedule=CronTriggerTimetable("0 17 * * *", timezone=EASTERN.key),
     start_date=START_DATE,
     catchup=False,
     max_active_runs=1,
     params={
         "forecast_date": Param(
-            type="string",
+            None,
+            type=["null", "string"],
             pattern=r"^[0-9]{8}$",
             title="Forecast date (YYYYMMDD)",
+            description="Leave blank to use the run's date in Eastern time.",
         ),
     },
     tags=["ecmwf", "hourly", "ingestion"],
@@ -38,9 +42,10 @@ def ecmwf_hourly_ingest():
 
     @task
     def ingest_data() -> dict[str, str]:
-        context = get_current_context()
-        conf = context["dag_run"].conf or {}
-        run_date = conf.get("forecast_date")
+        dag_run = get_current_context()["dag_run"]
+        run_date = (dag_run.conf or {}).get("forecast_date")
+        if run_date is None and dag_run.logical_date is not None:
+            run_date = dag_run.logical_date.astimezone(EASTERN).strftime("%Y%m%d")
         if not isinstance(run_date, str) or not re.fullmatch(r"[0-9]{8}", run_date):
             raise ValueError("Provide forecast_date in YYYYMMDD format")
         datetime.strptime(run_date, "%Y%m%d")

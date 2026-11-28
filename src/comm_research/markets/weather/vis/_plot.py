@@ -6,7 +6,7 @@ from pathlib import Path
 import pandas as pd
 import polars as pl
 
-from ._plot_data import plot_data
+from ._plot_data import LATEST_COLUMN, plot_data
 from ._spatial_regions import REGION_WINDOWS
 from .spatial_map import (
     SpatialMap,
@@ -41,14 +41,14 @@ def plot(
 
     Pass a metric column and optionally region names such as ``us48`` and
     ``europe``. Weather fills the selected countries' land areas. Empty
-    regions fit the available grid and mask water. Raw ECMWF rows use the
-    latest forecast cycle and the lowest-numbered available ensemble member.
+    regions fit the available grid and mask water. For raw ECMWF data, the
+    slider starts with each region's latest cycle and can include older ones.
     Valid times are shown in UTC. Output defaults to ``data/outputs/weather``
     at the repository root, with the filename based on the selected regions.
     """
     names = _selected_regions(regions, allow_empty=True)
     file_regions = tuple("us48" if name == "conus" else name for name in names)
-    windows = tuple(REGION_WINDOWS[name] for name in file_regions)
+    windows = {name: REGION_WINDOWS[name] for name in file_regions}
     data, time_col, lat_col, lon_col, units, grib = plot_data(df, metric, windows)
     temperature = _temperature_conversion(units) is not None
 
@@ -69,6 +69,7 @@ def plot(
         else None,
         palette="temperature" if temperature else "viridis",
         allow_grid_gaps=grib,
+        latest_col=LATEST_COLUMN if grib else None,
     )
     directory = _output_dir() if output_dir is None else Path(output_dir)
     filename = "-".join(file_regions) or "weather"

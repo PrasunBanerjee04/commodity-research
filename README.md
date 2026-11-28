@@ -47,9 +47,12 @@ offline. Pass `output_dir` to change where it is saved. Use `regions=[]` to fit
 the available grid, mask water, and save it as `weather.html`.
 
 The plot infers UTC valid times, coordinates, and units from the input. For
-raw ECMWF rows, it uses the latest forecast cycle and the lowest-numbered
-available ensemble member. For a preselected grid, provide one row per valid
-time, latitude, and longitude. The `us48` preset clips to the lower 48 states
+raw ECMWF rows, **Latest** combines the latest cycle available for each
+region. **Include history** shows every available valid time, using the newest
+cycle that covers that time in each region. Both views use the lowest-numbered
+available ensemble member for each forecast time. A region goes gray when it
+has no data at the selected time. For a preselected grid, provide one row per
+valid time, latitude, and longitude. The `us48` preset clips to the lower 48 states
 and DC. The `europe` preset follows Natural Earth boundaries for European
 countries, Turkey, and Cyprus within the available forecast window. Regions
 share a color scale across all timestamps. Water, land outside the selected
